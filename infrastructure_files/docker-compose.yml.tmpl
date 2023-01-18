@@ -21,13 +21,13 @@ services:
       - AUTH_REDIRECT_URI=$NETBIRD_AUTH_REDIRECT_URI
       - AUTH_SILENT_REDIRECT_URI=$NETBIRD_AUTH_SILENT_REDIRECT_URI
     volumes:
-      - $LETSENCRYPT_VOLUMENAME:/etc/letsencrypt/
+      - ../../volumes/letsencrypt:/etc/letsencrypt/
   # Signal
   signal:
     image: netbirdio/signal:latest
     restart: unless-stopped
     volumes:
-      - $SIGNAL_VOLUMENAME:/var/lib/netbird
+      - ../../volumes/signal:/var/lib/netbird
     ports:
       - 10000:80
   #     # port and command for Let's Encrypt validation
@@ -40,8 +40,8 @@ services:
     depends_on:
       - dashboard
     volumes:
-      - $MGMT_VOLUMENAME:/var/lib/netbird
-      - $LETSENCRYPT_VOLUMENAME:/etc/letsencrypt:ro
+      - ../../volumes/mgmt:/var/lib/netbird
+      - ../../volumes/letsencrypt:/etc/letsencrypt:ro
       - ./management.json:/etc/netbird/management.json
     ports:
       - $NETBIRD_MGMT_API_PORT:443 #API port
@@ -58,7 +58,7 @@ services:
     #      - ./privkey.pem:/etc/coturn/private/privkey.pem:ro
     #      - ./cert.pem:/etc/coturn/certs/cert.pem:ro
     network_mode: host
-volumes:
-  $MGMT_VOLUMENAME:
-  $SIGNAL_VOLUMENAME:
-  $LETSENCRYPT_VOLUMENAME:
+#volumes:
+#  ../../volumes/mgmt:
+#  ../../volumes/signal:
+#  ../../volumes/letsencrypt:

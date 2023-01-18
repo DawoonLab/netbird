@@ -7,7 +7,9 @@ bin/
 conf.json
 http-cmds.sh
 infrastructure_files/management.json
+infrastructure_files/turnserver.conf
 infrastructure_files/docker-compose.yml
+infrastructure_files/openid-configuration.json
 *.syso
 client/.distfiles/
 infrastructure_files/setup.env
