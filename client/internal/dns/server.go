@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/miekg/dns"
+	"github.com/mitchellh/hashstructure/v2"
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/iface"
 	log "github.com/sirupsen/logrus"
@@ -30,19 +31,21 @@ type Server interface {
 
 // DefaultServer dns server object
 type DefaultServer struct {
-	ctx               context.Context
-	stop              context.CancelFunc
-	mux               sync.Mutex
-	server            *dns.Server
-	dnsMux            *dns.ServeMux
-	dnsMuxMap         registrationMap
-	localResolver     *localResolver
-	wgInterface       *iface.WGIface
-	hostManager       hostManager
-	updateSerial      uint64
-	listenerIsRunning bool
-	runtimePort       int
-	runtimeIP         string
+	ctx                context.Context
+	stop               context.CancelFunc
+	mux                sync.Mutex
+	server             *dns.Server
+	dnsMux             *dns.ServeMux
+	dnsMuxMap          registrationMap
+	localResolver      *localResolver
+	wgInterface        *iface.WGIface
+	hostManager        hostManager
+	updateSerial       uint64
+	listenerIsRunning  bool
+	runtimePort        int
+	runtimeIP          string
+	previousConfigHash uint64
+	customAddress      *netip.AddrPort
 }
 
 type registrationMap map[string]struct{}
@@ -53,7 +56,7 @@ type muxUpdate struct {
 }
 
 // NewDefaultServer returns a new dns server
-func NewDefaultServer(ctx context.Context, wgInterface *iface.WGIface) (*DefaultServer, error) {
+func NewDefaultServer(ctx context.Context, wgInterface *iface.WGIface, customAddress string) (*DefaultServer, error) {
 	mux := dns.NewServeMux()
 
 	dnsServer := &dns.Server{
@@ -64,6 +67,16 @@ func NewDefaultServer(ctx context.Context, wgInterface *iface.WGIface) (*Default
 
 	ctx, stop := context.WithCancel(ctx)
 
+	var addrPort *netip.AddrPort
+	if customAddress != "" {
+		parsedAddrPort, err := netip.ParseAddrPort(customAddress)
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("unable to parse the custom dns address, got error: %s", err)
+		}
+		addrPort = &parsedAddrPort
+	}
+
 	defaultServer := &DefaultServer{
 		ctx:       ctx,
 		stop:      stop,
@@ -73,12 +86,14 @@ func NewDefaultServer(ctx context.Context, wgInterface *iface.WGIface) (*Default
 		localResolver: &localResolver{
 			registeredMap: make(registrationMap),
 		},
-		wgInterface: wgInterface,
-		runtimePort: defaultPort,
+		wgInterface:   wgInterface,
+		runtimePort:   defaultPort,
+		customAddress: addrPort,
 	}
 
 	hostmanager, err := newHostManager(wgInterface)
 	if err != nil {
+		stop()
 		return nil, err
 	}
 	defaultServer.hostManager = hostmanager
@@ -88,13 +103,19 @@ func NewDefaultServer(ctx context.Context, wgInterface *iface.WGIface) (*Default
 // Start runs the listener in a go routine
 func (s *DefaultServer) Start() {
 
-	ip, port, err := s.getFirstListenerAvailable()
-	if err != nil {
-		log.Error(err)
-		return
+	if s.customAddress != nil {
+		s.runtimeIP = s.customAddress.Addr().String()
+		s.runtimePort = int(s.customAddress.Port())
+	} else {
+		ip, port, err := s.getFirstListenerAvailable()
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		s.runtimeIP = ip
+		s.runtimePort = port
 	}
-	s.runtimeIP = ip
-	s.runtimePort = port
+
 	s.server.Addr = fmt.Sprintf("%s:%d", s.runtimeIP, s.runtimePort)
 
 	log.Debugf("starting dns on %s", s.server.Addr)
@@ -103,7 +124,7 @@ func (s *DefaultServer) Start() {
 		s.setListenerStatus(true)
 		defer s.setListenerStatus(false)
 
-		err = s.server.ListenAndServe()
+		err := s.server.ListenAndServe()
 		if err != nil {
 			log.Errorf("dns server running with %d port returned an error: %v. Will not retry", s.runtimePort, err)
 		}
@@ -184,6 +205,20 @@ func (s *DefaultServer) UpdateDNSServer(serial uint64, update nbdns.Config) erro
 		s.mux.Lock()
 		defer s.mux.Unlock()
 
+		hash, err := hashstructure.Hash(update, hashstructure.FormatV2, &hashstructure.HashOptions{
+			ZeroNil:         true,
+			IgnoreZeroValue: true,
+			SlicesAsSets:    true,
+		})
+		if err != nil {
+			log.Errorf("unable to hash the dns configuration update, got error: %s", err)
+		}
+
+		if s.previousConfigHash == hash {
+			log.Debugf("not applying the dns configuration update as there is nothing new")
+			s.updateSerial = serial
+			return nil
+		}
 		// is the service should be disabled, we stop the listener
 		// and proceed with a regular update to clean up the handlers and records
 		if !update.ServiceEnable {
@@ -215,6 +250,7 @@ func (s *DefaultServer) UpdateDNSServer(serial uint64, update nbdns.Config) erro
 		}
 
 		s.updateSerial = serial
+		s.previousConfigHash = hash
 
 		return nil
 	}

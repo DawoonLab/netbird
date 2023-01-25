@@ -6,6 +6,7 @@ import (
 	"github.com/eko/gocache/v3/cache"
 	cacheStore "github.com/eko/gocache/v3/store"
 	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/management/server/activity"
 	"github.com/netbirdio/netbird/management/server/idp"
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/status"
@@ -39,11 +40,11 @@ func cacheEntryExpiration() time.Duration {
 type AccountManager interface {
 	GetOrCreateAccountByUser(userId, domain string) (*Account, error)
 	CreateSetupKey(accountID string, keyName string, keyType SetupKeyType, expiresIn time.Duration,
-		autoGroups []string, usageLimit int) (*SetupKey, error)
-	SaveSetupKey(accountID string, key *SetupKey) (*SetupKey, error)
-	CreateUser(accountID string, key *UserInfo) (*UserInfo, error)
+		autoGroups []string, usageLimit int, userID string) (*SetupKey, error)
+	SaveSetupKey(accountID string, key *SetupKey, userID string) (*SetupKey, error)
+	CreateUser(accountID, userID string, key *UserInfo) (*UserInfo, error)
 	ListSetupKeys(accountID, userID string) ([]*SetupKey, error)
-	SaveUser(accountID string, key *User) (*UserInfo, error)
+	SaveUser(accountID, userID string, update *User) (*UserInfo, error)
 	GetSetupKey(accountID, userID, keyID string) (*SetupKey, error)
 	GetAccountByUserOrAccountID(userID, accountID, domain string) (*Account, error)
 	GetAccountFromToken(claims jwtclaims.AuthorizationClaims) (*Account, *User, error)
@@ -52,7 +53,7 @@ type AccountManager interface {
 	GetPeer(peerKey string) (*Peer, error)
 	GetPeers(accountID, userID string) ([]*Peer, error)
 	MarkPeerConnected(peerKey string, connected bool) error
-	DeletePeer(accountId string, peerKey string) (*Peer, error)
+	DeletePeer(accountID, peerKey, userID string) (*Peer, error)
 	GetPeerByIP(accountId string, peerIP string) (*Peer, error)
 	UpdatePeer(accountID string, peer *Peer) (*Peer, error)
 	GetNetworkMap(peerKey string) (*NetworkMap, error)
@@ -62,7 +63,7 @@ type AccountManager interface {
 	UpdatePeerSSHKey(peerKey string, sshKey string) error
 	GetUsersFromAccount(accountID, userID string) ([]*UserInfo, error)
 	GetGroup(accountId, groupID string) (*Group, error)
-	SaveGroup(accountId string, group *Group) error
+	SaveGroup(accountID, userID string, group *Group) error
 	UpdateGroup(accountID string, groupID string, operations []GroupUpdateOperation) (*Group, error)
 	DeleteGroup(accountId, groupID string) error
 	ListGroups(accountId string) ([]*Group, error)
@@ -70,9 +71,9 @@ type AccountManager interface {
 	GroupDeletePeer(accountId, groupID, peerKey string) error
 	GroupListPeers(accountId, groupID string) ([]*Peer, error)
 	GetRule(accountID, ruleID, userID string) (*Rule, error)
-	SaveRule(accountID string, rule *Rule) error
+	SaveRule(accountID, userID string, rule *Rule) error
 	UpdateRule(accountID string, ruleID string, operations []RuleUpdateOperation) (*Rule, error)
-	DeleteRule(accountId, ruleID string) error
+	DeleteRule(accountID, ruleID, userID string) error
 	ListRules(accountID, userID string) ([]*Rule, error)
 	GetRoute(accountID, routeID, userID string) (*route.Route, error)
 	CreateRoute(accountID string, prefix, peer, description, netID string, masquerade bool, metric int, groups []string, enabled bool) (*route.Route, error)
@@ -87,6 +88,9 @@ type AccountManager interface {
 	DeleteNameServerGroup(accountID, nsGroupID string) error
 	ListNameServerGroups(accountID string) ([]*nbdns.NameServerGroup, error)
 	GetDNSDomain() string
+	GetEvents(accountID, userID string) ([]*activity.Event, error)
+	GetDNSSettings(accountID string, userID string) (*DNSSettings, error)
+	SaveDNSSettings(accountID string, userID string, dnsSettingsToSave *DNSSettings) error
 }
 
 type DefaultAccountManager struct {
@@ -99,6 +103,7 @@ type DefaultAccountManager struct {
 	idpManager         idp.Manager
 	cacheManager       cache.CacheInterface[[]*idp.UserData]
 	ctx                context.Context
+	eventStore         activity.Store
 
 	// singleAccountMode indicates whether the instance has a single account.
 	// If true, then every new user will end up under the same account.
@@ -126,6 +131,7 @@ type Account struct {
 	Rules                  map[string]*Rule
 	Routes                 map[string]*route.Route
 	NameServerGroups       map[string]*nbdns.NameServerGroup
+	DNSSettings            *DNSSettings
 }
 
 type UserInfo struct {
@@ -251,6 +257,11 @@ func (a *Account) GetPeerRules(peerPubKey string) (srcRules []*Rule, dstRules []
 	return srcRules, dstRules
 }
 
+// GetGroup returns a group by ID if exists, nil otherwise
+func (a *Account) GetGroup(groupID string) *Group {
+	return a.Groups[groupID]
+}
+
 // GetPeers returns a list of all Account peers
 func (a *Account) GetPeers() []*Peer {
 	var peers []*Peer
@@ -331,6 +342,21 @@ func (a *Account) getUserGroups(userID string) ([]string, error) {
 	return user.AutoGroups, nil
 }
 
+func (a *Account) getPeerDNSManagementStatus(peerID string) bool {
+	peerGroups := a.getPeerGroups(peerID)
+	enabled := true
+	if a.DNSSettings != nil {
+		for _, groupID := range a.DNSSettings.DisabledManagementGroups {
+			_, found := peerGroups[groupID]
+			if found {
+				enabled = false
+				break
+			}
+		}
+	}
+	return enabled
+}
+
 func (a *Account) getPeerGroups(peerID string) lookupMap {
 	groupList := make(lookupMap)
 	for groupID, group := range a.Groups {
@@ -407,6 +433,11 @@ func (a *Account) Copy() *Account {
 		nsGroups[id] = nsGroup.Copy()
 	}
 
+	var dnsSettings *DNSSettings
+	if a.DNSSettings != nil {
+		dnsSettings = a.DNSSettings
+	}
+
 	return &Account{
 		Id:                     a.Id,
 		CreatedBy:              a.CreatedBy,
@@ -421,6 +452,7 @@ func (a *Account) Copy() *Account {
 		Rules:                  rules,
 		Routes:                 routes,
 		NameServerGroups:       nsGroups,
+		DNSSettings:            dnsSettings,
 	}
 }
 
@@ -435,7 +467,7 @@ func (a *Account) GetGroupAll() (*Group, error) {
 
 // BuildManager creates a new DefaultAccountManager with a provided Store
 func BuildManager(store Store, peersUpdateManager *PeersUpdateManager, idpManager idp.Manager,
-	singleAccountModeDomain string, dnsDomain string) (*DefaultAccountManager, error) {
+	singleAccountModeDomain string, dnsDomain string, eventStore activity.Store) (*DefaultAccountManager, error) {
 	am := &DefaultAccountManager{
 		Store:              store,
 		peersUpdateManager: peersUpdateManager,
@@ -444,6 +476,7 @@ func BuildManager(store Store, peersUpdateManager *PeersUpdateManager, idpManage
 		cacheMux:           sync.Mutex{},
 		cacheLoading:       map[string]chan struct{}{},
 		dnsDomain:          dnsDomain,
+		eventStore:         eventStore,
 	}
 	allAccounts := store.GetAllAccounts()
 	// enable single account mode only if configured by user and number of existing accounts is not grater than 1
@@ -510,7 +543,18 @@ func (am *DefaultAccountManager) newAccount(userID, domain string) (*Account, er
 			log.Warnf("an account with ID already exists, retrying...")
 			continue
 		} else if statusErr.Type() == status.NotFound {
-			return newAccountWithId(accountId, userID, domain), nil
+			newAccount := newAccountWithId(accountId, userID, domain)
+			_, err = am.eventStore.Save(&activity.Event{
+				Timestamp:   time.Now(),
+				Activity:    activity.AccountCreated,
+				AccountID:   newAccount.Id,
+				TargetID:    newAccount.Id,
+				InitiatorID: userID,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return newAccount, nil
 		} else {
 			return nil, err
 		}
@@ -797,6 +841,19 @@ func (am *DefaultAccountManager) handleNewUserAccount(domainAcc *Account, claims
 		return nil, err
 	}
 
+	event := &activity.Event{
+		Timestamp:   time.Now(),
+		Activity:    activity.UserJoined,
+		AccountID:   account.Id,
+		TargetID:    claims.UserId,
+		InitiatorID: claims.UserId,
+	}
+
+	_, err = am.eventStore.Save(event)
+	if err != nil {
+		return nil, err
+	}
+
 	return account, nil
 }
 
@@ -828,6 +885,17 @@ func (am *DefaultAccountManager) redeemInvite(account *Account, userID string) e
 				return
 			}
 			log.Debugf("user %s of account %s redeemed invite", user.ID, account.Id)
+			_, err = am.eventStore.Save(&activity.Event{
+				Timestamp:   time.Now(),
+				Activity:    activity.UserJoined,
+				AccountID:   account.Id,
+				TargetID:    userID,
+				InitiatorID: userID,
+			})
+			if err != nil {
+				log.Warnf("failed saving activity event %v", err)
+				return
+			}
 		}()
 	}
 
@@ -998,6 +1066,9 @@ func newAccountWithId(accountId, userId, domain string) *Account {
 	routes := make(map[string]*route.Route)
 	nameServersGroups := make(map[string]*nbdns.NameServerGroup)
 	users[userId] = NewAdminUser(userId)
+	dnsSettings := &DNSSettings{
+		DisabledManagementGroups: make([]string, 0),
+	}
 	log.Debugf("created new account %s with setup key %s", accountId, defaultKey.Key)
 
 	acc := &Account{
@@ -1010,6 +1081,7 @@ func newAccountWithId(accountId, userId, domain string) *Account {
 		Domain:           domain,
 		Routes:           routes,
 		NameServerGroups: nameServersGroups,
+		DNSSettings:      dnsSettings,
 	}
 
 	addAllGroup(acc)

@@ -11,6 +11,32 @@ const (
 	BearerAuthScopes = "BearerAuth.Scopes"
 )
 
+// Defines values for EventActivityCode.
+const (
+	EventActivityCodeAccountCreate                           EventActivityCode = "account.create"
+	EventActivityCodeDnsSettingDisabledManagementGroupAdd    EventActivityCode = "dns.setting.disabled.management.group.add"
+	EventActivityCodeDnsSettingDisabledManagementGroupDelete EventActivityCode = "dns.setting.disabled.management.group.delete"
+	EventActivityCodeGroupAdd                                EventActivityCode = "group.add"
+	EventActivityCodeGroupUpdate                             EventActivityCode = "group.update"
+	EventActivityCodeRuleAdd                                 EventActivityCode = "rule.add"
+	EventActivityCodeRuleDelete                              EventActivityCode = "rule.delete"
+	EventActivityCodeRuleUpdate                              EventActivityCode = "rule.update"
+	EventActivityCodeSetupkeyAdd                             EventActivityCode = "setupkey.add"
+	EventActivityCodeSetupkeyGroupAdd                        EventActivityCode = "setupkey.group.add"
+	EventActivityCodeSetupkeyGroupDelete                     EventActivityCode = "setupkey.group.delete"
+	EventActivityCodeSetupkeyOveruse                         EventActivityCode = "setupkey.overuse"
+	EventActivityCodeSetupkeyPeerAdd                         EventActivityCode = "setupkey.peer.add"
+	EventActivityCodeSetupkeyRevoke                          EventActivityCode = "setupkey.revoke"
+	EventActivityCodeSetupkeyUpdate                          EventActivityCode = "setupkey.update"
+	EventActivityCodeUserGroupAdd                            EventActivityCode = "user.group.add"
+	EventActivityCodeUserGroupDelete                         EventActivityCode = "user.group.delete"
+	EventActivityCodeUserInvite                              EventActivityCode = "user.invite"
+	EventActivityCodeUserJoin                                EventActivityCode = "user.join"
+	EventActivityCodeUserPeerAdd                             EventActivityCode = "user.peer.add"
+	EventActivityCodeUserPeerDelete                          EventActivityCode = "user.peer.delete"
+	EventActivityCodeUserRoleUpdate                          EventActivityCode = "user.role.update"
+)
+
 // Defines values for GroupPatchOperationOp.
 const (
 	GroupPatchOperationOpAdd     GroupPatchOperationOp = "add"
@@ -96,6 +122,39 @@ const (
 	UserStatusDisabled UserStatus = "disabled"
 	UserStatusInvited  UserStatus = "invited"
 )
+
+// DNSSettings defines model for DNSSettings.
+type DNSSettings struct {
+	// DisabledManagementGroups Groups whose DNS management is disabled
+	DisabledManagementGroups []string `json:"disabled_management_groups"`
+}
+
+// Event defines model for Event.
+type Event struct {
+	// Activity The activity that occurred during the event
+	Activity string `json:"activity"`
+
+	// ActivityCode The string code of the activity that occurred during the event
+	ActivityCode EventActivityCode `json:"activity_code"`
+
+	// Id Event unique identifier
+	Id string `json:"id"`
+
+	// InitiatorId The ID of the initiator of the event. E.g., an ID of a user that triggered the event.
+	InitiatorId string `json:"initiator_id"`
+
+	// Meta The metadata of the event
+	Meta map[string]string `json:"meta"`
+
+	// TargetId The ID of the target of the event. E.g., an ID of the peer that a user removed.
+	TargetId string `json:"target_id"`
+
+	// Timestamp The date and time when the event occurred
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// EventActivityCode The string code of the activity that occurred during the event
+type EventActivityCode string
 
 // Group defines model for Group.
 type Group struct {
@@ -607,6 +666,9 @@ type PatchApiDnsNameserversIdJSONRequestBody = PatchApiDnsNameserversIdJSONBody
 
 // PutApiDnsNameserversIdJSONRequestBody defines body for PutApiDnsNameserversId for application/json ContentType.
 type PutApiDnsNameserversIdJSONRequestBody = NameserverGroupRequest
+
+// PutApiDnsSettingsJSONRequestBody defines body for PutApiDnsSettings for application/json ContentType.
+type PutApiDnsSettingsJSONRequestBody = DNSSettings
 
 // PostApiGroupsJSONRequestBody defines body for PostApiGroups for application/json ContentType.
 type PostApiGroupsJSONRequestBody PostApiGroupsJSONBody
