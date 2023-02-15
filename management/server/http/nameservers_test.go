@@ -3,15 +3,16 @@ package http
 import (
 	"bytes"
 	"encoding/json"
-	nbdns "github.com/netbirdio/netbird/dns"
-	"github.com/netbirdio/netbird/management/server/http/api"
-	"github.com/netbirdio/netbird/management/server/status"
-	"github.com/stretchr/testify/assert"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
+
+	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/management/server/http/api"
+	"github.com/netbirdio/netbird/management/server/status"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/gorilla/mux"
 	"github.com/netbirdio/netbird/management/server"
@@ -63,7 +64,7 @@ func initNameserversTestData() *Nameservers {
 				}
 				return nil, status.Errorf(status.NotFound, "nameserver group with ID %s not found", nsGroupID)
 			},
-			CreateNameServerGroupFunc: func(accountID string, name, description string, nameServerList []nbdns.NameServer, groups []string, primary bool, domains []string, enabled bool) (*nbdns.NameServerGroup, error) {
+			CreateNameServerGroupFunc: func(accountID string, name, description string, nameServerList []nbdns.NameServer, groups []string, primary bool, domains []string, enabled bool, _ string) (*nbdns.NameServerGroup, error) {
 				return &nbdns.NameServerGroup{
 					ID:          existingNSGroupID,
 					Name:        name,
@@ -75,16 +76,16 @@ func initNameserversTestData() *Nameservers {
 					Domains:     domains,
 				}, nil
 			},
-			DeleteNameServerGroupFunc: func(accountID, nsGroupID string) error {
+			DeleteNameServerGroupFunc: func(accountID, nsGroupID, _ string) error {
 				return nil
 			},
-			SaveNameServerGroupFunc: func(accountID string, nsGroupToSave *nbdns.NameServerGroup) error {
+			SaveNameServerGroupFunc: func(accountID, _ string, nsGroupToSave *nbdns.NameServerGroup) error {
 				if nsGroupToSave.ID == existingNSGroupID {
 					return nil
 				}
 				return status.Errorf(status.NotFound, "nameserver group with ID %s was not found", nsGroupToSave.ID)
 			},
-			UpdateNameServerGroupFunc: func(accountID, nsGroupID string, operations []server.NameServerGroupUpdateOperation) (*nbdns.NameServerGroup, error) {
+			UpdateNameServerGroupFunc: func(accountID, nsGroupID, _ string, operations []server.NameServerGroupUpdateOperation) (*nbdns.NameServerGroup, error) {
 				nsGroupToUpdate := baseExistingNSGroup.Copy()
 				if nsGroupID != nsGroupToUpdate.ID {
 					return nil, status.Errorf(status.NotFound, "nameserver group ID %s no longer exists", nsGroupID)
@@ -110,19 +111,18 @@ func initNameserversTestData() *Nameservers {
 				return nsGroupToUpdate, nil
 			},
 			GetAccountFromTokenFunc: func(_ jwtclaims.AuthorizationClaims) (*server.Account, *server.User, error) {
-				return testingNSAccount, nil, nil
+				return testingNSAccount, testingAccount.Users["test_user"], nil
 			},
 		},
-		authAudience: "",
-		jwtExtractor: jwtclaims.ClaimsExtractor{
-			ExtractClaimsFromRequestContext: func(r *http.Request, authAudiance string) jwtclaims.AuthorizationClaims {
+		claimsExtractor: jwtclaims.NewClaimsExtractor(
+			jwtclaims.WithFromRequestContext(func(r *http.Request) jwtclaims.AuthorizationClaims {
 				return jwtclaims.AuthorizationClaims{
 					UserId:    "test_user",
 					Domain:    "hotmail.com",
 					AccountId: testNSGroupAccountID,
 				}
-			},
-		},
+			}),
+		),
 	}
 }
 

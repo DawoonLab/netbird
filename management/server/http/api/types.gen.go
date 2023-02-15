@@ -18,6 +18,15 @@ const (
 	EventActivityCodeDnsSettingDisabledManagementGroupDelete EventActivityCode = "dns.setting.disabled.management.group.delete"
 	EventActivityCodeGroupAdd                                EventActivityCode = "group.add"
 	EventActivityCodeGroupUpdate                             EventActivityCode = "group.update"
+	EventActivityCodeNameserverGroupAdd                      EventActivityCode = "nameserver.group.add"
+	EventActivityCodeNameserverGroupDelete                   EventActivityCode = "nameserver.group.delete"
+	EventActivityCodeNameserverGroupUpdate                   EventActivityCode = "nameserver.group.update"
+	EventActivityCodePeerRename                              EventActivityCode = "peer.rename"
+	EventActivityCodePeerSshDisable                          EventActivityCode = "peer.ssh.disable"
+	EventActivityCodePeerSshEnable                           EventActivityCode = "peer.ssh.enable"
+	EventActivityCodeRouteAdd                                EventActivityCode = "route.add"
+	EventActivityCodeRouteDelete                             EventActivityCode = "route.delete"
+	EventActivityCodeRouteUpdate                             EventActivityCode = "route.update"
 	EventActivityCodeRuleAdd                                 EventActivityCode = "rule.add"
 	EventActivityCodeRuleDelete                              EventActivityCode = "rule.delete"
 	EventActivityCodeRuleUpdate                              EventActivityCode = "rule.update"
@@ -556,6 +565,9 @@ type User struct {
 
 	// Id User ID
 	Id string `json:"id"`
+
+	// IsCurrent Is true if authenticated user is the same as this user
+	IsCurrent *bool `json:"is_current,omitempty"`
 
 	// Name User's name from idp provider
 	Name string `json:"name"`

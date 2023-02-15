@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/stretchr/testify/assert"
@@ -134,17 +135,7 @@ func TestAccountManager_GetOrCreateAccountByUser(t *testing.T) {
 	}
 
 	// check the corresponding events that should have been generated
-	events, err := manager.GetEvents(account.Id, userID)
-	if err != nil {
-		return
-	}
-
-	var ev *activity.Event
-	for _, event := range events {
-		if event.Activity == activity.AccountCreated {
-			ev = event
-		}
-	}
+	ev := getEvent(t, account.Id, manager, activity.AccountCreated)
 
 	assert.NotNil(t, ev)
 	assert.Equal(t, account.Id, ev.AccountID)
@@ -502,8 +493,8 @@ func TestAccountManager_GetAccount(t *testing.T) {
 	}
 
 	for _, peer := range account.Peers {
-		if _, ok := getAccount.Peers[peer.Key]; !ok {
-			t.Errorf("expected account to have peer %s, not found", peer.Key)
+		if _, ok := getAccount.Peers[peer.ID]; !ok {
+			t.Errorf("expected account to have peer %s, not found", peer.ID)
 		}
 	}
 
@@ -582,26 +573,14 @@ func TestAccountManager_AddPeer(t *testing.T) {
 	if account.Network.CurrentSerial() != 1 {
 		t.Errorf("expecting Network Serial=%d to be incremented by 1 and be equal to %d when adding new peer to account", serial, account.Network.CurrentSerial())
 	}
-
-	// check the corresponding events that should have been generated
-	events, err := manager.GetEvents(account.Id, userID)
-	if err != nil {
-		return
-	}
-
-	var ev *activity.Event
-	for _, event := range events {
-		if event.Activity == activity.PeerAddedWithSetupKey {
-			ev = event
-		}
-	}
+	ev := getEvent(t, account.Id, manager, activity.PeerAddedWithSetupKey)
 
 	assert.NotNil(t, ev)
 	assert.Equal(t, account.Id, ev.AccountID)
 	assert.Equal(t, peer.Name, ev.Meta["name"])
 	assert.Equal(t, peer.FQDN(account.Domain), ev.Meta["fqdn"])
 	assert.Equal(t, setupKey.Id, ev.InitiatorID)
-	assert.Equal(t, peer.IP.String(), ev.TargetID)
+	assert.Equal(t, peer.ID, ev.TargetID)
 	assert.Equal(t, peer.IP.String(), fmt.Sprint(ev.Meta["ip"]))
 }
 
@@ -664,25 +643,14 @@ func TestAccountManager_AddPeerWithUserID(t *testing.T) {
 		t.Errorf("expecting Network Serial=%d to be incremented by 1 and be equal to %d when adding new peer to account", serial, account.Network.CurrentSerial())
 	}
 
-	// check the corresponding events that should have been generated
-	events, err := manager.GetEvents(account.Id, userID)
-	if err != nil {
-		return
-	}
-
-	var ev *activity.Event
-	for _, event := range events {
-		if event.Activity == activity.PeerAddedByUser {
-			ev = event
-		}
-	}
+	ev := getEvent(t, account.Id, manager, activity.PeerAddedByUser)
 
 	assert.NotNil(t, ev)
 	assert.Equal(t, account.Id, ev.AccountID)
 	assert.Equal(t, peer.Name, ev.Meta["name"])
 	assert.Equal(t, peer.FQDN(account.Domain), ev.Meta["fqdn"])
 	assert.Equal(t, userID, ev.InitiatorID)
-	assert.Equal(t, peer.IP.String(), ev.TargetID)
+	assert.Equal(t, peer.ID, ev.TargetID)
 	assert.Equal(t, peer.IP.String(), fmt.Sprint(ev.Meta["ip"]))
 }
 
@@ -749,13 +717,13 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		return
 	}
 
-	updMsg := manager.peersUpdateManager.CreateChannel(peer1.Key)
-	defer manager.peersUpdateManager.CloseChannel(peer1.Key)
+	updMsg := manager.peersUpdateManager.CreateChannel(peer1.ID)
+	defer manager.peersUpdateManager.CloseChannel(peer1.ID)
 
 	group := Group{
 		ID:    "group-id",
 		Name:  "GroupA",
-		Peers: []string{peer1.Key, peer2.Key, peer3.Key},
+		Peers: []string{peer1.ID, peer2.ID, peer3.ID},
 	}
 
 	rule := Rule{
@@ -842,7 +810,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 			}
 		}()
 
-		if _, err := manager.DeletePeer(account.Id, peer3.Key, userID); err != nil {
+		if _, err := manager.DeletePeer(account.Id, peer3.ID, userID); err != nil {
 			t.Errorf("delete peer: %v", err)
 			return
 		}
@@ -921,18 +889,7 @@ func TestAccountManager_DeletePeer(t *testing.T) {
 		t.Errorf("expecting Network Serial=%d to be incremented and be equal to 2 after adding and deleteing a peer", account.Network.CurrentSerial())
 	}
 
-	// check the corresponding events that should have been generated
-	events, err := manager.GetEvents(account.Id, userID)
-	if err != nil {
-		return
-	}
-
-	var ev *activity.Event
-	for _, event := range events {
-		if event.Activity == activity.PeerRemovedByUser {
-			ev = event
-		}
-	}
+	ev := getEvent(t, account.Id, manager, activity.PeerRemovedByUser)
 
 	assert.NotNil(t, ev)
 	assert.Equal(t, account.Id, ev.AccountID)
@@ -941,6 +898,24 @@ func TestAccountManager_DeletePeer(t *testing.T) {
 	assert.Equal(t, userID, ev.InitiatorID)
 	assert.Equal(t, peer.IP.String(), ev.TargetID)
 	assert.Equal(t, peer.IP.String(), fmt.Sprint(ev.Meta["ip"]))
+}
+func getEvent(t *testing.T, accountID string, manager AccountManager, eventType activity.Activity) *activity.Event {
+	for {
+		select {
+		case <-time.After(time.Second):
+			t.Fatal("no PeerAddedWithSetupKey event was generated")
+		default:
+			events, err := manager.GetEvents(accountID, userID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Activity == eventType {
+					return event
+				}
+			}
+		}
+	}
 }
 
 func TestGetUsersFromAccount(t *testing.T) {
@@ -1026,13 +1001,13 @@ func TestAccountManager_UpdatePeerMeta(t *testing.T) {
 		OS:        "new-OS",
 		WtVersion: "new-WtVersion",
 	}
-	err = manager.UpdatePeerMeta(peer.Key, newMeta)
+	err = manager.UpdatePeerMeta(peer.ID, newMeta)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	p, err := manager.GetPeer(peer.Key)
+	p, err := manager.GetPeerByKey(peer.Key)
 	if err != nil {
 		return
 	}

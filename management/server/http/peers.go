@@ -3,31 +3,43 @@ package http
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+
 	"github.com/gorilla/mux"
 	"github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/http/api"
 	"github.com/netbirdio/netbird/management/server/http/util"
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/status"
-	"net/http"
 )
 
 // Peers is a handler that returns peers of the account
 type Peers struct {
-	accountManager server.AccountManager
-	authAudience   string
-	jwtExtractor   jwtclaims.ClaimsExtractor
+	accountManager  server.AccountManager
+	claimsExtractor *jwtclaims.ClaimsExtractor
 }
 
-func NewPeers(accountManager server.AccountManager, authAudience string) *Peers {
+func NewPeers(accountManager server.AccountManager, authCfg AuthCfg) *Peers {
 	return &Peers{
 		accountManager: accountManager,
-		authAudience:   authAudience,
-		jwtExtractor:   *jwtclaims.NewClaimsExtractor(nil),
+		claimsExtractor: jwtclaims.NewClaimsExtractor(
+			jwtclaims.WithAudience(authCfg.Audience),
+			jwtclaims.WithUserIDClaim(authCfg.UserIDClaim),
+		),
 	}
 }
 
-func (h *Peers) updatePeer(account *server.Account, peer *server.Peer, w http.ResponseWriter, r *http.Request) {
+func (h *Peers) getPeer(account *server.Account, peerID, userID string, w http.ResponseWriter) {
+	peer, err := h.accountManager.GetPeer(account.Id, peerID, userID)
+	if err != nil {
+		util.WriteError(err, w)
+		return
+	}
+
+	util.WriteJSONObject(w, toPeerResponse(peer, account, h.accountManager.GetDNSDomain()))
+}
+
+func (h *Peers) updatePeer(account *server.Account, user *server.User, peerID string, w http.ResponseWriter, r *http.Request) {
 	req := &api.PutApiPeersIdJSONBody{}
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -35,8 +47,8 @@ func (h *Peers) updatePeer(account *server.Account, peer *server.Peer, w http.Re
 		return
 	}
 
-	update := &server.Peer{Key: peer.Key, SSHEnabled: req.SshEnabled, Name: req.Name}
-	peer, err = h.accountManager.UpdatePeer(account.Id, update)
+	update := &server.Peer{ID: peerID, SSHEnabled: req.SshEnabled, Name: req.Name}
+	peer, err := h.accountManager.UpdatePeer(account.Id, user.Id, update)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -45,8 +57,8 @@ func (h *Peers) updatePeer(account *server.Account, peer *server.Peer, w http.Re
 	util.WriteJSONObject(w, toPeerResponse(peer, account, dnsDomain))
 }
 
-func (h *Peers) deletePeer(accountID, userID string, peer *server.Peer, w http.ResponseWriter, r *http.Request) {
-	_, err := h.accountManager.DeletePeer(accountID, peer.Key, userID)
+func (h *Peers) deletePeer(accountID, userID string, peerID string, w http.ResponseWriter) {
+	_, err := h.accountManager.DeletePeer(accountID, peerID, userID)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -55,48 +67,38 @@ func (h *Peers) deletePeer(accountID, userID string, peer *server.Peer, w http.R
 }
 
 func (h *Peers) HandlePeer(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+	claims := h.claimsExtractor.FromRequestContext(r)
 	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
 		return
 	}
 	vars := mux.Vars(r)
-	peerId := vars["id"] //effectively peer IP address
-	if len(peerId) == 0 {
+	peerID := vars["id"]
+	if len(peerID) == 0 {
 		util.WriteError(status.Errorf(status.InvalidArgument, "invalid peer ID"), w)
 		return
 	}
 
-	peer, err := h.accountManager.GetPeerByIP(account.Id, peerId)
-	if err != nil {
-		util.WriteError(err, w)
-		return
-	}
-
-	dnsDomain := h.accountManager.GetDNSDomain()
-
 	switch r.Method {
 	case http.MethodDelete:
-		h.deletePeer(account.Id, user.Id, peer, w, r)
+		h.deletePeer(account.Id, user.Id, peerID, w)
 		return
 	case http.MethodPut:
-		h.updatePeer(account, peer, w, r)
+		h.updatePeer(account, user, peerID, w, r)
 		return
 	case http.MethodGet:
-		util.WriteJSONObject(w, toPeerResponse(peer, account, dnsDomain))
+		h.getPeer(account, peerID, user.Id, w)
 		return
-
 	default:
 		util.WriteError(status.Errorf(status.NotFound, "unknown METHOD"), w)
 	}
-
 }
 
 func (h *Peers) GetPeers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+		claims := h.claimsExtractor.FromRequestContext(r)
 		account, user, err := h.accountManager.GetAccountFromToken(claims)
 		if err != nil {
 			util.WriteError(err, w)
@@ -132,7 +134,7 @@ func toPeerResponse(peer *server.Peer, account *server.Account, dnsDomain string
 		}
 		groupsChecked[group.ID] = struct{}{}
 		for _, pk := range group.Peers {
-			if pk == peer.Key {
+			if pk == peer.ID {
 				info := api.GroupMinimum{
 					Id:         group.ID,
 					Name:       group.Name,
@@ -149,7 +151,7 @@ func toPeerResponse(peer *server.Peer, account *server.Account, dnsDomain string
 		fqdn = peer.DNSLabel
 	}
 	return &api.Peer{
-		Id:         peer.IP.String(),
+		Id:         peer.ID,
 		Name:       peer.Name,
 		Ip:         peer.IP.String(),
 		Connected:  peer.Status.Connected,

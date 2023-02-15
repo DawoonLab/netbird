@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/stretchr/testify/assert"
 	"testing"
 
 	"github.com/rs/xid"
@@ -34,7 +35,7 @@ func TestAccountManager_GetNetworkMap(t *testing.T) {
 		return
 	}
 
-	_, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  peerKey1.PublicKey().String(),
 		Meta: PeerSystemMeta{},
 		Name: "test-peer-2",
@@ -61,7 +62,7 @@ func TestAccountManager_GetNetworkMap(t *testing.T) {
 		return
 	}
 
-	networkMap, err := manager.GetNetworkMap(peerKey1.PublicKey().String())
+	networkMap, err := manager.GetNetworkMap(peer1.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -107,7 +108,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		return
 	}
 
-	_, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  peerKey1.PublicKey().String(),
 		Meta: PeerSystemMeta{},
 		Name: "test-peer-2",
@@ -123,7 +124,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	_, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	peer2, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  peerKey2.PublicKey().String(),
 		Meta: PeerSystemMeta{},
 		Name: "test-peer-2",
@@ -156,8 +157,8 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 	group1.Name = "src"
 	group2.Name = "dst"
 	rule.ID = xid.New().String()
-	group1.Peers = append(group1.Peers, peerKey1.PublicKey().String())
-	group2.Peers = append(group2.Peers, peerKey2.PublicKey().String())
+	group1.Peers = append(group1.Peers, peer1.ID)
+	group2.Peers = append(group2.Peers, peer2.ID)
 
 	err = manager.SaveGroup(account.Id, userID, &group1)
 	if err != nil {
@@ -180,7 +181,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		return
 	}
 
-	networkMap1, err := manager.GetNetworkMap(peerKey1.PublicKey().String())
+	networkMap1, err := manager.GetNetworkMap(peer1.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -203,7 +204,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		)
 	}
 
-	networkMap2, err := manager.GetNetworkMap(peerKey2.PublicKey().String())
+	networkMap2, err := manager.GetNetworkMap(peer2.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -228,7 +229,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		return
 	}
 
-	networkMap1, err = manager.GetNetworkMap(peerKey1.PublicKey().String())
+	networkMap1, err = manager.GetNetworkMap(peer1.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -243,7 +244,7 @@ func TestAccountManager_GetNetworkMapWithRule(t *testing.T) {
 		return
 	}
 
-	networkMap2, err = manager.GetNetworkMap(peerKey2.PublicKey().String())
+	networkMap2, err = manager.GetNetworkMap(peer2.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -268,12 +269,7 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var setupKey *SetupKey
-	for _, key := range account.SetupKeys {
-		if key.Type == SetupKeyReusable {
-			setupKey = key
-		}
-	}
+	setupKey := getSetupKey(account, SetupKeyReusable)
 
 	peerKey1, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -281,7 +277,7 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		return
 	}
 
-	_, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  peerKey1.PublicKey().String(),
 		Meta: PeerSystemMeta{},
 		Name: "test-peer-2",
@@ -308,7 +304,7 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		return
 	}
 
-	network, err := manager.GetPeerNetwork(peerKey1.PublicKey().String())
+	network, err := manager.GetPeerNetwork(peer1.ID)
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -318,4 +314,120 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		t.Errorf("expecting Account Networks ID to be equal, got %s expected %s", network.Id, account.Network.Id)
 	}
 
+}
+
+func TestDefaultAccountManager_GetPeer(t *testing.T) {
+	manager, err := createManager(t)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	// account with an admin and a regular user
+	accountID := "test_account"
+	adminUser := "account_creator"
+	someUser := "some_user"
+	account := newAccountWithId(accountID, adminUser, "")
+	account.Users[someUser] = &User{
+		Id:   someUser,
+		Role: UserRoleUser,
+	}
+	err = manager.Store.SaveAccount(account)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	// two peers one added by a regular user and one with a setup key
+	setupKey := getSetupKey(account, SetupKeyReusable)
+	peerKey1, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	peer1, err := manager.AddPeer("", someUser, &Peer{
+		Key:  peerKey1.PublicKey().String(),
+		Meta: PeerSystemMeta{},
+		Name: "test-peer-2",
+	})
+
+	if err != nil {
+		t.Errorf("expecting peer to be added, got failure %v", err)
+		return
+	}
+
+	peerKey2, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	// the second peer added with a setup key
+	peer2, err := manager.AddPeer(setupKey.Key, "", &Peer{
+		Key:  peerKey2.PublicKey().String(),
+		Meta: PeerSystemMeta{},
+		Name: "test-peer-2",
+	})
+
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	// the user can see its own peer
+	peer, err := manager.GetPeer(accountID, peer1.ID, someUser)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	assert.NotNil(t, peer)
+
+	// the user can see peer2 because peer1 of the user has access to peer2 due to the All group and the default rule 0 all-to-all access
+	peer, err = manager.GetPeer(accountID, peer2.ID, someUser)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	assert.NotNil(t, peer)
+
+	// delete the all-to-all rule so that user's peer1 has no access to peer2
+	for _, rule := range account.Rules {
+		err = manager.DeleteRule(accountID, rule.ID, adminUser)
+		if err != nil {
+			t.Fatal(err)
+			return
+		}
+	}
+
+	// at this point the user can't see the details of peer2
+	peer, err = manager.GetPeer(accountID, peer2.ID, someUser) //nolint
+	assert.Error(t, err)
+
+	// admin users can always access all the peers
+	peer, err = manager.GetPeer(accountID, peer1.ID, adminUser)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	assert.NotNil(t, peer)
+
+	peer, err = manager.GetPeer(accountID, peer2.ID, adminUser)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	assert.NotNil(t, peer)
+
+}
+
+func getSetupKey(account *Account, keyType SetupKeyType) *SetupKey {
+
+	var setupKey *SetupKey
+	for _, key := range account.SetupKeys {
+		if key.Type == keyType {
+			setupKey = key
+		}
+	}
+	return setupKey
 }

@@ -2,6 +2,9 @@ package http
 
 import (
 	"encoding/json"
+	"net/http"
+	"unicode/utf8"
+
 	"github.com/gorilla/mux"
 	"github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/http/api"
@@ -9,29 +12,28 @@ import (
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/status"
 	"github.com/netbirdio/netbird/route"
-	"net/http"
-	"unicode/utf8"
 )
 
 // Routes is the routes handler of the account
 type Routes struct {
-	jwtExtractor   jwtclaims.ClaimsExtractor
-	accountManager server.AccountManager
-	authAudience   string
+	accountManager  server.AccountManager
+	claimsExtractor *jwtclaims.ClaimsExtractor
 }
 
 // NewRoutes returns a new instance of Routes handler
-func NewRoutes(accountManager server.AccountManager, authAudience string) *Routes {
+func NewRoutes(accountManager server.AccountManager, authCfg AuthCfg) *Routes {
 	return &Routes{
 		accountManager: accountManager,
-		authAudience:   authAudience,
-		jwtExtractor:   *jwtclaims.NewClaimsExtractor(nil),
+		claimsExtractor: jwtclaims.NewClaimsExtractor(
+			jwtclaims.WithAudience(authCfg.Audience),
+			jwtclaims.WithUserIDClaim(authCfg.UserIDClaim),
+		),
 	}
 }
 
 // GetAllRoutesHandler returns the list of routes for the account
 func (h *Routes) GetAllRoutesHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+	claims := h.claimsExtractor.FromRequestContext(r)
 	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
@@ -45,7 +47,7 @@ func (h *Routes) GetAllRoutesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	apiRoutes := make([]*api.Route, 0)
 	for _, r := range routes {
-		apiRoutes = append(apiRoutes, toRouteResponse(account, r))
+		apiRoutes = append(apiRoutes, toRouteResponse(r))
 	}
 
 	util.WriteJSONObject(w, apiRoutes)
@@ -53,8 +55,8 @@ func (h *Routes) GetAllRoutesHandler(w http.ResponseWriter, r *http.Request) {
 
 // CreateRouteHandler handles route creation request
 func (h *Routes) CreateRouteHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
-	account, _, err := h.accountManager.GetAccountFromToken(claims)
+	claims := h.claimsExtractor.FromRequestContext(r)
+	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -65,16 +67,6 @@ func (h *Routes) CreateRouteHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		util.WriteErrorResponse("couldn't parse JSON request", http.StatusBadRequest, w)
 		return
-	}
-
-	peerKey := req.Peer
-	if req.Peer != "" {
-		peer, err := h.accountManager.GetPeerByIP(account.Id, req.Peer)
-		if err != nil {
-			util.WriteError(err, w)
-			return
-		}
-		peerKey = peer.Key
 	}
 
 	_, newPrefix, err := route.ParseNetwork(req.Network)
@@ -89,20 +81,20 @@ func (h *Routes) CreateRouteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRoute, err := h.accountManager.CreateRoute(account.Id, newPrefix.String(), peerKey, req.Description, req.NetworkId, req.Masquerade, req.Metric, req.Groups, req.Enabled)
+	newRoute, err := h.accountManager.CreateRoute(account.Id, newPrefix.String(), req.Peer, req.Description, req.NetworkId, req.Masquerade, req.Metric, req.Groups, req.Enabled, user.Id)
 	if err != nil {
 		util.WriteError(err, w)
 		return
 	}
 
-	resp := toRouteResponse(account, newRoute)
+	resp := toRouteResponse(newRoute)
 
 	util.WriteJSONObject(w, &resp)
 }
 
 // UpdateRouteHandler handles update to a route identified by a given ID
 func (h *Routes) UpdateRouteHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+	claims := h.claimsExtractor.FromRequestContext(r)
 	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
@@ -136,16 +128,6 @@ func (h *Routes) UpdateRouteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerKey := req.Peer
-	if req.Peer != "" {
-		peer, err := h.accountManager.GetPeerByIP(account.Id, req.Peer)
-		if err != nil {
-			util.WriteError(err, w)
-			return
-		}
-		peerKey = peer.Key
-	}
-
 	if utf8.RuneCountInString(req.NetworkId) > route.MaxNetIDChar || req.NetworkId == "" {
 		util.WriteError(status.Errorf(status.InvalidArgument,
 			"identifier should be between 1 and %d", route.MaxNetIDChar), w)
@@ -158,27 +140,27 @@ func (h *Routes) UpdateRouteHandler(w http.ResponseWriter, r *http.Request) {
 		NetID:       req.NetworkId,
 		NetworkType: prefixType,
 		Masquerade:  req.Masquerade,
-		Peer:        peerKey,
+		Peer:        req.Peer,
 		Metric:      req.Metric,
 		Description: req.Description,
 		Enabled:     req.Enabled,
 		Groups:      req.Groups,
 	}
 
-	err = h.accountManager.SaveRoute(account.Id, newRoute)
+	err = h.accountManager.SaveRoute(account.Id, user.Id, newRoute)
 	if err != nil {
 		util.WriteError(err, w)
 		return
 	}
 
-	resp := toRouteResponse(account, newRoute)
+	resp := toRouteResponse(newRoute)
 
 	util.WriteJSONObject(w, &resp)
 }
 
 // PatchRouteHandler handles patch updates to a route identified by a given ID
 func (h *Routes) PatchRouteHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+	claims := h.claimsExtractor.FromRequestContext(r)
 	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
@@ -255,18 +237,9 @@ func (h *Routes) PatchRouteHandler(w http.ResponseWriter, r *http.Request) {
 					"value field only accepts 1 value, got %d", len(patch.Value)), w)
 				return
 			}
-			peerValue := patch.Value
-			if patch.Value[0] != "" {
-				peer, err := h.accountManager.GetPeerByIP(account.Id, patch.Value[0])
-				if err != nil {
-					util.WriteError(err, w)
-					return
-				}
-				peerValue = []string{peer.Key}
-			}
 			operations = append(operations, server.RouteUpdateOperation{
 				Type:   server.UpdateRoutePeer,
-				Values: peerValue,
+				Values: patch.Value,
 			})
 		case api.RoutePatchOperationPathMetric:
 			if patch.Op != api.RoutePatchOperationOpReplace {
@@ -315,21 +288,21 @@ func (h *Routes) PatchRouteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	route, err := h.accountManager.UpdateRoute(account.Id, routeID, operations)
+	root, err := h.accountManager.UpdateRoute(account.Id, routeID, operations)
 	if err != nil {
 		util.WriteError(err, w)
 		return
 	}
 
-	resp := toRouteResponse(account, route)
+	resp := toRouteResponse(root)
 
 	util.WriteJSONObject(w, &resp)
 }
 
 // DeleteRouteHandler handles route deletion request
 func (h *Routes) DeleteRouteHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
-	account, _, err := h.accountManager.GetAccountFromToken(claims)
+	claims := h.claimsExtractor.FromRequestContext(r)
+	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -341,7 +314,7 @@ func (h *Routes) DeleteRouteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.accountManager.DeleteRoute(account.Id, routeID)
+	err = h.accountManager.DeleteRoute(account.Id, routeID, user.Id)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -352,7 +325,7 @@ func (h *Routes) DeleteRouteHandler(w http.ResponseWriter, r *http.Request) {
 
 // GetRouteHandler handles a route Get request identified by ID
 func (h *Routes) GetRouteHandler(w http.ResponseWriter, r *http.Request) {
-	claims := h.jwtExtractor.ExtractClaimsFromRequestContext(r, h.authAudience)
+	claims := h.claimsExtractor.FromRequestContext(r)
 	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
@@ -371,25 +344,16 @@ func (h *Routes) GetRouteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	util.WriteJSONObject(w, toRouteResponse(account, foundRoute))
+	util.WriteJSONObject(w, toRouteResponse(foundRoute))
 }
 
-func toRouteResponse(account *server.Account, serverRoute *route.Route) *api.Route {
-	var peerIP string
-	if serverRoute.Peer != "" {
-		peer, found := account.Peers[serverRoute.Peer]
-		if !found {
-			panic("peer ID not found")
-		}
-		peerIP = peer.IP.String()
-	}
-
+func toRouteResponse(serverRoute *route.Route) *api.Route {
 	return &api.Route{
 		Id:          serverRoute.ID,
 		Description: serverRoute.Description,
 		NetworkId:   serverRoute.NetID,
 		Enabled:     serverRoute.Enabled,
-		Peer:        peerIP,
+		Peer:        serverRoute.Peer,
 		Network:     serverRoute.Network.String(),
 		NetworkType: serverRoute.NetworkType.String(),
 		Masquerade:  serverRoute.Masquerade,
