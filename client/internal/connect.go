@@ -6,25 +6,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	log "github.com/sirupsen/logrus"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"google.golang.org/grpc/codes"
+	gstatus "google.golang.org/grpc/status"
+
+	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/stdnet"
 	"github.com/netbirdio/netbird/client/ssh"
-	nbStatus "github.com/netbirdio/netbird/client/status"
-
 	"github.com/netbirdio/netbird/client/system"
-
 	"github.com/netbirdio/netbird/iface"
 	mgm "github.com/netbirdio/netbird/management/client"
 	mgmProto "github.com/netbirdio/netbird/management/proto"
 	signal "github.com/netbirdio/netbird/signal/client"
-	log "github.com/sirupsen/logrus"
-
-	"github.com/cenkalti/backoff/v4"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-	"google.golang.org/grpc/codes"
-	gstatus "google.golang.org/grpc/status"
 )
 
 // RunClient with main logic.
-func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Status) error {
+func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status, tunAdapter iface.TunAdapter, iFaceDiscover stdnet.IFaceDiscover) error {
 	backOff := &backoff.ExponentialBackOff{
 		InitialInterval:     time.Second,
 		RandomizationFactor: 1,
@@ -60,9 +59,10 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 		return err
 	}
 
-	managementURL := config.ManagementURL.String()
-	statusRecorder.MarkManagementDisconnected(managementURL)
+	statusRecorder.MarkManagementDisconnected()
 
+	statusRecorder.ClientStart()
+	defer statusRecorder.ClientStop()
 	operation := func() error {
 		// if context cancelled we not start new backoff cycle
 		select {
@@ -75,7 +75,7 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 
 		engineCtx, cancel := context.WithCancel(ctx)
 		defer func() {
-			statusRecorder.MarkManagementDisconnected(managementURL)
+			statusRecorder.MarkManagementDisconnected()
 			statusRecorder.CleanLocalPeerState()
 			cancel()
 		}()
@@ -85,6 +85,9 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 		if err != nil {
 			return wrapErr(gstatus.Errorf(codes.FailedPrecondition, "failed connecting to Management Service : %s", err))
 		}
+		mgmNotifier := statusRecorderToMgmConnStateNotifier(statusRecorder)
+		mgmClient.SetConnStateListener(mgmNotifier)
+
 		log.Debugf("connected to the Management service %s", config.ManagementURL.Host)
 		defer func() {
 			err = mgmClient.Close()
@@ -103,9 +106,9 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 			}
 			return wrapErr(err)
 		}
-		statusRecorder.MarkManagementConnected(managementURL)
+		statusRecorder.MarkManagementConnected()
 
-		localPeerState := nbStatus.LocalPeerState{
+		localPeerState := peer.LocalPeerState{
 			IP:              loginResp.GetPeerConfig().GetAddress(),
 			PubKey:          myPrivateKey.PublicKey().String(),
 			KernelInterface: iface.WireguardModuleIsLoaded(),
@@ -119,8 +122,10 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 			loginResp.GetWiretrusteeConfig().GetSignal().GetUri(),
 		)
 
-		statusRecorder.MarkSignalDisconnected(signalURL)
-		defer statusRecorder.MarkSignalDisconnected(signalURL)
+		statusRecorder.UpdateSignalAddress(signalURL)
+
+		statusRecorder.MarkSignalDisconnected()
+		defer statusRecorder.MarkSignalDisconnected()
 
 		// with the global Wiretrustee config in hand connect (just a connection, no stream yet) Signal
 		signalClient, err := connectToSignal(engineCtx, loginResp.GetWiretrusteeConfig(), myPrivateKey)
@@ -135,11 +140,14 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 			}
 		}()
 
-		statusRecorder.MarkSignalConnected(signalURL)
+		signalNotifier := statusRecorderToSignalConnStateNotifier(statusRecorder)
+		signalClient.SetConnStateListener(signalNotifier)
+
+		statusRecorder.MarkSignalConnected()
 
 		peerConfig := loginResp.GetPeerConfig()
 
-		engineConfig, err := createEngineConfig(myPrivateKey, config, peerConfig)
+		engineConfig, err := createEngineConfig(myPrivateKey, config, peerConfig, tunAdapter, iFaceDiscover)
 		if err != nil {
 			log.Error(err)
 			return wrapErr(err)
@@ -156,6 +164,7 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 		state.Set(StatusConnected)
 
 		<-engineCtx.Done()
+		statusRecorder.ClientTeardown()
 
 		backOff.Reset()
 
@@ -186,11 +195,13 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *nbStatus.Sta
 }
 
 // createEngineConfig converts configuration received from Management Service to EngineConfig
-func createEngineConfig(key wgtypes.Key, config *Config, peerConfig *mgmProto.PeerConfig) (*EngineConfig, error) {
+func createEngineConfig(key wgtypes.Key, config *Config, peerConfig *mgmProto.PeerConfig, tunAdapter iface.TunAdapter, iFaceDiscover stdnet.IFaceDiscover) (*EngineConfig, error) {
 
 	engineConf := &EngineConfig{
 		WgIfaceName:          config.WgIface,
 		WgAddr:               peerConfig.Address,
+		TunAdapter:           tunAdapter,
+		IFaceDiscover:        iFaceDiscover,
 		IFaceBlackList:       config.IFaceBlackList,
 		DisableIPv6Discovery: config.DisableIPv6Discovery,
 		WgPrivateKey:         key,
@@ -251,7 +262,7 @@ func loginToManagement(ctx context.Context, client mgm.Client, pubSSHKey []byte)
 // The check is performed only for the NetBird's managed version.
 func UpdateOldManagementPort(ctx context.Context, config *Config, configPath string) (*Config, error) {
 
-	defaultManagementURL, err := ParseURL("Management URL", DefaultManagementURL)
+	defaultManagementURL, err := parseURL("Management URL", DefaultManagementURL)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +284,7 @@ func UpdateOldManagementPort(ctx context.Context, config *Config, configPath str
 
 	if mgmTlsEnabled && config.ManagementURL.Port() == fmt.Sprintf("%d", ManagementLegacyPort) {
 
-		newURL, err := ParseURL("Management URL", fmt.Sprintf("%s://%s:%d",
+		newURL, err := parseURL("Management URL", fmt.Sprintf("%s://%s:%d",
 			config.ManagementURL.Scheme, config.ManagementURL.Hostname(), 443))
 		if err != nil {
 			return nil, err
@@ -307,7 +318,7 @@ func UpdateOldManagementPort(ctx context.Context, config *Config, configPath str
 		}
 
 		// everything is alright => update the config
-		newConfig, err := ReadConfig(ConfigInput{
+		newConfig, err := UpdateConfig(ConfigInput{
 			ManagementURL: newURL.String(),
 			ConfigPath:    configPath,
 		})
@@ -321,4 +332,16 @@ func UpdateOldManagementPort(ctx context.Context, config *Config, configPath str
 	}
 
 	return config, nil
+}
+
+func statusRecorderToMgmConnStateNotifier(statusRecorder *peer.Status) mgm.ConnStateNotifier {
+	var sri interface{} = statusRecorder
+	mgmNotifier, _ := sri.(mgm.ConnStateNotifier)
+	return mgmNotifier
+}
+
+func statusRecorderToSignalConnStateNotifier(statusRecorder *peer.Status) signal.ConnStateNotifier {
+	var sri interface{} = statusRecorder
+	notifier, _ := sri.(signal.ConnStateNotifier)
+	return notifier
 }

@@ -19,6 +19,12 @@ const (
 	RuleUpdated
 	// RuleRemoved indicates that a user removed a rule
 	RuleRemoved
+	// PolicyAdded indicates that a user added a new policy
+	PolicyAdded
+	// PolicyUpdated indicates that a user updated a policy
+	PolicyUpdated
+	// PolicyRemoved indicates that a user removed a policy
+	PolicyRemoved
 	// SetupKeyCreated indicates that a user created a new setup key
 	SetupKeyCreated
 	// SetupKeyUpdated indicates that a user updated a setup key
@@ -61,12 +67,26 @@ const (
 	PeerSSHDisabled
 	// PeerRenamed indicates that a user renamed a peer
 	PeerRenamed
+	// PeerLoginExpirationEnabled indicates that a user enabled login expiration of a peer
+	PeerLoginExpirationEnabled
+	// PeerLoginExpirationDisabled indicates that a user disabled login expiration of a peer
+	PeerLoginExpirationDisabled
 	// NameserverGroupCreated indicates that a user created a nameservers group
 	NameserverGroupCreated
 	// NameserverGroupDeleted indicates that a user deleted a nameservers group
 	NameserverGroupDeleted
 	// NameserverGroupUpdated indicates that a user updated a nameservers group
 	NameserverGroupUpdated
+	// AccountPeerLoginExpirationEnabled indicates that a user enabled peer login expiration for the account
+	AccountPeerLoginExpirationEnabled
+	// AccountPeerLoginExpirationDisabled indicates that a user disabled peer login expiration for the account
+	AccountPeerLoginExpirationDisabled
+	// AccountPeerLoginExpirationDurationUpdated indicates that a user updated peer login expiration duration for the account
+	AccountPeerLoginExpirationDurationUpdated
+	// PersonalAccessTokenCreated indicates that a user created a personal access token
+	PersonalAccessTokenCreated
+	// PersonalAccessTokenDeleted indicates that a user deleted a personal access token
+	PersonalAccessTokenDeleted
 )
 
 const (
@@ -74,11 +94,11 @@ const (
 	PeerAddedByUserMessage string = "Peer added"
 	// PeerAddedWithSetupKeyMessage is a human-readable text message of the PeerAddedWithSetupKey activity
 	PeerAddedWithSetupKeyMessage = PeerAddedByUserMessage
-	//UserJoinedMessage is a human-readable text message of the UserJoined activity
+	// UserJoinedMessage is a human-readable text message of the UserJoined activity
 	UserJoinedMessage string = "User joined"
-	//UserInvitedMessage is a human-readable text message of the UserInvited activity
+	// UserInvitedMessage is a human-readable text message of the UserInvited activity
 	UserInvitedMessage string = "User invited"
-	//AccountCreatedMessage is a human-readable text message of the AccountCreated activity
+	// AccountCreatedMessage is a human-readable text message of the AccountCreated activity
 	AccountCreatedMessage string = "Account created"
 	// PeerRemovedByUserMessage is a human-readable text message of the PeerRemovedByUser activity
 	PeerRemovedByUserMessage string = "Peer deleted"
@@ -88,6 +108,12 @@ const (
 	RuleRemovedMessage string = "Rule deleted"
 	// RuleUpdatedMessage is a human-readable text message of the RuleRemoved activity
 	RuleUpdatedMessage string = "Rule updated"
+	// PolicyAddedMessage is a human-readable text message of the PolicyAdded activity
+	PolicyAddedMessage string = "Policy added"
+	// PolicyRemovedMessage is a human-readable text message of the PolicyRemoved activity
+	PolicyRemovedMessage string = "Policy deleted"
+	// PolicyUpdatedMessage is a human-readable text message of the PolicyRemoved activity
+	PolicyUpdatedMessage string = "Policy updated"
 	// SetupKeyCreatedMessage is a human-readable text message of the SetupKeyCreated activity
 	SetupKeyCreatedMessage string = "Setup key created"
 	// SetupKeyUpdatedMessage is a human-readable text message of the SetupKeyUpdated activity
@@ -130,12 +156,26 @@ const (
 	PeerSSHDisabledMessage string = "Peer SSH server disabled"
 	// PeerRenamedMessage is a human-readable text message of the PeerRenamed activity
 	PeerRenamedMessage string = "Peer renamed"
+	// PeerLoginExpirationDisabledMessage is a human-readable text message of the PeerLoginExpirationDisabled activity
+	PeerLoginExpirationDisabledMessage string = "Peer login expiration disabled"
+	// PeerLoginExpirationEnabledMessage is a human-readable text message of the PeerLoginExpirationEnabled activity
+	PeerLoginExpirationEnabledMessage string = "Peer login expiration enabled"
 	// NameserverGroupCreatedMessage is a human-readable text message of the NameserverGroupCreated activity
 	NameserverGroupCreatedMessage string = "Nameserver group created"
 	// NameserverGroupDeletedMessage is a human-readable text message of the NameserverGroupDeleted activity
 	NameserverGroupDeletedMessage string = "Nameserver group deleted"
 	// NameserverGroupUpdatedMessage is a human-readable text message of the NameserverGroupUpdated activity
 	NameserverGroupUpdatedMessage string = "Nameserver group updated"
+	// AccountPeerLoginExpirationEnabledMessage is a human-readable text message of the AccountPeerLoginExpirationEnabled activity
+	AccountPeerLoginExpirationEnabledMessage string = "Peer login expiration enabled for the account"
+	// AccountPeerLoginExpirationDisabledMessage is a human-readable text message of the AccountPeerLoginExpirationDisabled activity
+	AccountPeerLoginExpirationDisabledMessage string = "Peer login expiration disabled for the account"
+	// AccountPeerLoginExpirationDurationUpdatedMessage is a human-readable text message of the AccountPeerLoginExpirationDurationUpdated activity
+	AccountPeerLoginExpirationDurationUpdatedMessage string = "Peer login expiration duration updated"
+	// PersonalAccessTokenCreatedMessage is a human-readable text message of the PersonalAccessTokenCreated activity
+	PersonalAccessTokenCreatedMessage string = "Personal access token created"
+	// PersonalAccessTokenDeletedMessage is a human-readable text message of the PersonalAccessTokenDeleted activity
+	PersonalAccessTokenDeletedMessage string = "Personal access token deleted"
 )
 
 // Activity that triggered an Event
@@ -162,6 +202,12 @@ func (a Activity) Message() string {
 		return RuleRemovedMessage
 	case RuleUpdated:
 		return RuleUpdatedMessage
+	case PolicyAdded:
+		return PolicyAddedMessage
+	case PolicyRemoved:
+		return PolicyRemovedMessage
+	case PolicyUpdated:
+		return PolicyUpdatedMessage
 	case SetupKeyCreated:
 		return SetupKeyCreatedMessage
 	case SetupKeyUpdated:
@@ -202,6 +248,10 @@ func (a Activity) Message() string {
 		return PeerSSHEnabledMessage
 	case PeerSSHDisabled:
 		return PeerSSHDisabledMessage
+	case PeerLoginExpirationEnabled:
+		return PeerLoginExpirationEnabledMessage
+	case PeerLoginExpirationDisabled:
+		return PeerLoginExpirationDisabledMessage
 	case PeerRenamed:
 		return PeerRenamedMessage
 	case NameserverGroupCreated:
@@ -210,6 +260,16 @@ func (a Activity) Message() string {
 		return NameserverGroupDeletedMessage
 	case NameserverGroupUpdated:
 		return NameserverGroupUpdatedMessage
+	case AccountPeerLoginExpirationEnabled:
+		return AccountPeerLoginExpirationEnabledMessage
+	case AccountPeerLoginExpirationDisabled:
+		return AccountPeerLoginExpirationDisabledMessage
+	case AccountPeerLoginExpirationDurationUpdated:
+		return AccountPeerLoginExpirationDurationUpdatedMessage
+	case PersonalAccessTokenCreated:
+		return PersonalAccessTokenCreatedMessage
+	case PersonalAccessTokenDeleted:
+		return PersonalAccessTokenDeletedMessage
 	default:
 		return "UNKNOWN_ACTIVITY"
 	}
@@ -236,6 +296,12 @@ func (a Activity) StringCode() string {
 		return "rule.delete"
 	case RuleUpdated:
 		return "rule.update"
+	case PolicyAdded:
+		return "policy.add"
+	case PolicyRemoved:
+		return "policy.delete"
+	case PolicyUpdated:
+		return "policy.update"
 	case SetupKeyCreated:
 		return "setupkey.add"
 	case SetupKeyRevoked:
@@ -278,12 +344,26 @@ func (a Activity) StringCode() string {
 		return "peer.ssh.enable"
 	case PeerSSHDisabled:
 		return "peer.ssh.disable"
+	case PeerLoginExpirationDisabled:
+		return "peer.login.expiration.disable"
+	case PeerLoginExpirationEnabled:
+		return "peer.login.expiration.enable"
 	case NameserverGroupCreated:
 		return "nameserver.group.add"
 	case NameserverGroupDeleted:
 		return "nameserver.group.delete"
 	case NameserverGroupUpdated:
 		return "nameserver.group.update"
+	case AccountPeerLoginExpirationDurationUpdated:
+		return "account.setting.peer.login.expiration.update"
+	case AccountPeerLoginExpirationEnabled:
+		return "account.setting.peer.login.expiration.enable"
+	case AccountPeerLoginExpirationDisabled:
+		return "account.setting.peer.login.expiration.disable"
+	case PersonalAccessTokenCreated:
+		return "personal.access.token.create"
+	case PersonalAccessTokenDeleted:
+		return "personal.access.token.delete"
 	default:
 		return "UNKNOWN_ACTIVITY"
 	}

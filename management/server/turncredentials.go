@@ -63,18 +63,18 @@ func (m *TimeBasedAuthSecretsManager) GenerateCredentials() TURNCredentials {
 
 }
 
-func (m *TimeBasedAuthSecretsManager) cancel(peerKey string) {
-	if channel, ok := m.cancelMap[peerKey]; ok {
+func (m *TimeBasedAuthSecretsManager) cancel(peerID string) {
+	if channel, ok := m.cancelMap[peerID]; ok {
 		close(channel)
-		delete(m.cancelMap, peerKey)
+		delete(m.cancelMap, peerID)
 	}
 }
 
 // CancelRefresh cancels scheduled peer credentials refresh
-func (m *TimeBasedAuthSecretsManager) CancelRefresh(peerKey string) {
+func (m *TimeBasedAuthSecretsManager) CancelRefresh(peerID string) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
-	m.cancel(peerKey)
+	m.cancel(peerID)
 }
 
 // SetupRefresh starts peer credentials refresh. Since credentials are expiring (TTL) it is necessary to always generate them and send to the peer.
@@ -115,6 +115,7 @@ func (m *TimeBasedAuthSecretsManager) SetupRefresh(peerID string) {
 						Turns: turns,
 					},
 				}
+				log.Debugf("sending new TURN credentials to peer %s", peerID)
 				err := m.updateManager.SendUpdate(peerID, &UpdateMessage{Update: update})
 				if err != nil {
 					log.Errorf("error while sending TURN update to peer %s %v", peerID, err)

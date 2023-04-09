@@ -7,10 +7,11 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/netbirdio/netbird/client/status"
+	"github.com/stretchr/testify/require"
+
+	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/iface"
 	"github.com/netbirdio/netbird/route"
-	"github.com/stretchr/testify/require"
 )
 
 // send 5 routes, one for server and 4 for clients, one normal and 2 HA and one small
@@ -390,14 +391,14 @@ func TestManagerUpdateRoutes(t *testing.T) {
 
 	for n, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			wgInterface, err := iface.NewWGIFace(fmt.Sprintf("utun43%d", n), "100.65.65.2/24", iface.DefaultMTU)
+			wgInterface, err := iface.NewWGIFace(fmt.Sprintf("utun43%d", n), "100.65.65.2/24", iface.DefaultMTU, nil)
 			require.NoError(t, err, "should create testing WGIface interface")
 			defer wgInterface.Close()
 
 			err = wgInterface.Create()
 			require.NoError(t, err, "should create testing wireguard interface")
 
-			statusRecorder := status.NewRecorder()
+			statusRecorder := peer.NewRecorder("https://mgm")
 			ctx := context.TODO()
 			routeManager := NewManager(ctx, localPeerKey, wgInterface, statusRecorder)
 			defer routeManager.Stop()

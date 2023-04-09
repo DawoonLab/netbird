@@ -12,7 +12,7 @@ import (
 
 func TestGetConfig(t *testing.T) {
 	// case 1: new default config has to be generated
-	config, err := GetConfig(ConfigInput{
+	config, err := UpdateOrCreateConfig(ConfigInput{
 		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
 	})
 
@@ -32,7 +32,7 @@ func TestGetConfig(t *testing.T) {
 	preSharedKey := "preSharedKey"
 
 	// case 2: new config has to be generated
-	config, err = GetConfig(ConfigInput{
+	config, err = UpdateOrCreateConfig(ConfigInput{
 		ManagementURL: managementURL,
 		AdminURL:      adminURL,
 		ConfigPath:    path,
@@ -50,7 +50,7 @@ func TestGetConfig(t *testing.T) {
 	}
 
 	// case 3: existing config -> fetch it
-	config, err = GetConfig(ConfigInput{
+	config, err = UpdateOrCreateConfig(ConfigInput{
 		ManagementURL: managementURL,
 		AdminURL:      adminURL,
 		ConfigPath:    path,
@@ -65,7 +65,7 @@ func TestGetConfig(t *testing.T) {
 
 	// case 4: existing config, but new managementURL has been provided -> update config
 	newManagementURL := "https://test.newManagement.url:33071"
-	config, err = GetConfig(ConfigInput{
+	config, err = UpdateOrCreateConfig(ConfigInput{
 		ManagementURL: newManagementURL,
 		AdminURL:      adminURL,
 		ConfigPath:    path,
@@ -84,4 +84,41 @@ func TestGetConfig(t *testing.T) {
 		return
 	}
 	assert.Equal(t, readConf.(*Config).ManagementURL.String(), newManagementURL)
+}
+
+func TestHiddenPreSharedKey(t *testing.T) {
+	hidden := "**********"
+	samplePreSharedKey := "mysecretpresharedkey"
+	tests := []struct {
+		name         string
+		preSharedKey *string
+		want         string
+	}{
+		{"nil", nil, ""},
+		{"hidden", &hidden, ""},
+		{"filled", &samplePreSharedKey, samplePreSharedKey},
+	}
+
+	// generate default cfg
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	_, _ = UpdateOrCreateConfig(ConfigInput{
+		ConfigPath: cfgFile,
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := UpdateOrCreateConfig(ConfigInput{
+				ConfigPath:   cfgFile,
+				PreSharedKey: tt.preSharedKey,
+			})
+
+			if err != nil {
+				t.Fatalf("failed to get cfg: %s", err)
+			}
+
+			if cfg.PreSharedKey != tt.want {
+				t.Fatalf("invalid preshared key: '%s', expected: '%s' ", cfg.PreSharedKey, tt.want)
+			}
+		})
+	}
 }

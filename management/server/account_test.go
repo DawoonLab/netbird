@@ -1,20 +1,24 @@
 package server
 
 import (
+	"crypto/sha256"
+	b64 "encoding/base64"
 	"fmt"
-	nbdns "github.com/netbirdio/netbird/dns"
-	"github.com/netbirdio/netbird/management/server/activity"
-	"github.com/netbirdio/netbird/route"
 	"net"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/netbirdio/netbird/management/server/jwtclaims"
+	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/route"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
 )
 
 func verifyCanAddPeerToAccount(t *testing.T, manager AccountManager, account *Account, userID string) {
@@ -38,7 +42,7 @@ func verifyCanAddPeerToAccount(t *testing.T, manager AccountManager, account *Ac
 		setupKey = key.Key
 	}
 
-	_, err := manager.AddPeer(setupKey, userID, peer)
+	_, _, err := manager.AddPeer(setupKey, userID, peer)
 	if err != nil {
 		t.Error("expected to add new peer successfully after creating new account, but failed", err)
 	}
@@ -98,8 +102,123 @@ func verifyNewAccountHasDefaultFields(t *testing.T, account *Account, createdBy 
 	}
 }
 
-func TestNewAccount(t *testing.T) {
+func TestAccount_GetPeerNetworkMap(t *testing.T) {
+	peerID1 := "peer-1"
+	peerID2 := "peer-2"
+	tt := []struct {
+		name                 string
+		accountSettings      Settings
+		peerID               string
+		expectedPeers        []string
+		expectedOfflinePeers []string
+		peers                map[string]*Peer
+	}{
+		{
+			name:                 "Should return ALL peers when global peer login expiration disabled",
+			accountSettings:      Settings{PeerLoginExpirationEnabled: false, PeerLoginExpiration: time.Hour},
+			peerID:               peerID1,
+			expectedPeers:        []string{peerID2},
+			expectedOfflinePeers: []string{},
+			peers: map[string]*Peer{
+				"peer-1": {
+					ID:       peerID1,
+					Key:      "peer-1-key",
+					IP:       net.IP{100, 64, 0, 1},
+					Name:     peerID1,
+					DNSLabel: peerID1,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    false,
+						LoginExpired: true,
+					},
+					UserID:    userID,
+					LastLogin: time.Now().Add(-time.Hour * 24 * 30 * 30),
+				},
+				"peer-2": {
+					ID:       peerID2,
+					Key:      "peer-2-key",
+					IP:       net.IP{100, 64, 0, 1},
+					Name:     peerID2,
+					DNSLabel: peerID2,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    false,
+						LoginExpired: false,
+					},
+					UserID:                 userID,
+					LastLogin:              time.Now(),
+					LoginExpirationEnabled: true,
+				},
+			},
+		},
+		{
+			name:                 "Should return no peers when global peer login expiration enabled and peers expired",
+			accountSettings:      Settings{PeerLoginExpirationEnabled: true, PeerLoginExpiration: time.Hour},
+			peerID:               peerID1,
+			expectedPeers:        []string{},
+			expectedOfflinePeers: []string{peerID2},
+			peers: map[string]*Peer{
+				"peer-1": {
+					ID:       peerID1,
+					Key:      "peer-1-key",
+					IP:       net.IP{100, 64, 0, 1},
+					Name:     peerID1,
+					DNSLabel: peerID1,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    false,
+						LoginExpired: true,
+					},
+					UserID:                 userID,
+					LastLogin:              time.Now().Add(-time.Hour * 24 * 30 * 30),
+					LoginExpirationEnabled: true,
+				},
+				"peer-2": {
+					ID:       peerID2,
+					Key:      "peer-2-key",
+					IP:       net.IP{100, 64, 0, 1},
+					Name:     peerID2,
+					DNSLabel: peerID2,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    false,
+						LoginExpired: true,
+					},
+					UserID:                 userID,
+					LastLogin:              time.Now().Add(-time.Hour * 24 * 30 * 30),
+					LoginExpirationEnabled: true,
+				},
+			},
+		},
+	}
 
+	netIP := net.IP{100, 64, 0, 0}
+	netMask := net.IPMask{255, 255, 0, 0}
+	network := &Network{
+		Id:     "network",
+		Net:    net.IPNet{IP: netIP, Mask: netMask},
+		Dns:    "netbird.selfhosted",
+		Serial: 0,
+		mu:     sync.Mutex{},
+	}
+
+	for _, testCase := range tt {
+		account := newAccountWithId("account-1", userID, "netbird.io")
+		account.Network = network
+		account.Peers = testCase.peers
+		for _, peer := range account.Peers {
+			all, _ := account.GetGroupAll()
+			account.Groups[all.ID].Peers = append(account.Groups[all.ID].Peers, peer.ID)
+		}
+
+		networkMap := account.GetPeerNetworkMap(testCase.peerID, "netbird.io")
+		assert.Len(t, networkMap.Peers, len(testCase.expectedPeers))
+		assert.Len(t, networkMap.OfflinePeers, len(testCase.expectedOfflinePeers))
+	}
+
+}
+
+func TestNewAccount(t *testing.T) {
 	domain := "netbird.io"
 	userId := "account_creator"
 	accountID := "account_id"
@@ -341,6 +460,79 @@ func TestDefaultAccountManager_GetAccountFromToken(t *testing.T) {
 	}
 }
 
+func TestAccountManager_GetAccountFromPAT(t *testing.T) {
+	store := newStore(t)
+	account := newAccountWithId("account_id", "testuser", "")
+
+	token := "nbp_9999EUDNdkeusjentDLSJEn1902u84390W6W"
+	hashedToken := sha256.Sum256([]byte(token))
+	encodedHashedToken := b64.StdEncoding.EncodeToString(hashedToken[:])
+	account.Users["someUser"] = &User{
+		Id: "someUser",
+		PATs: map[string]*PersonalAccessToken{
+			"tokenId": {
+				ID:          "tokenId",
+				HashedToken: encodedHashedToken,
+			},
+		},
+	}
+	err := store.SaveAccount(account)
+	if err != nil {
+		t.Fatalf("Error when saving account: %s", err)
+	}
+
+	am := DefaultAccountManager{
+		Store: store,
+	}
+
+	account, user, pat, err := am.GetAccountFromPAT(token)
+	if err != nil {
+		t.Fatalf("Error when getting Account from PAT: %s", err)
+	}
+
+	assert.Equal(t, "account_id", account.Id)
+	assert.Equal(t, "someUser", user.Id)
+	assert.Equal(t, account.Users["someUser"].PATs["tokenId"], pat)
+}
+
+func TestDefaultAccountManager_MarkPATUsed(t *testing.T) {
+	store := newStore(t)
+	account := newAccountWithId("account_id", "testuser", "")
+
+	token := "nbp_9999EUDNdkeusjentDLSJEn1902u84390W6W"
+	hashedToken := sha256.Sum256([]byte(token))
+	encodedHashedToken := b64.StdEncoding.EncodeToString(hashedToken[:])
+	account.Users["someUser"] = &User{
+		Id: "someUser",
+		PATs: map[string]*PersonalAccessToken{
+			"tokenId": {
+				ID:          "tokenId",
+				HashedToken: encodedHashedToken,
+				LastUsed:    time.Time{},
+			},
+		},
+	}
+	err := store.SaveAccount(account)
+	if err != nil {
+		t.Fatalf("Error when saving account: %s", err)
+	}
+
+	am := DefaultAccountManager{
+		Store: store,
+	}
+
+	err = am.MarkPATUsed("tokenId")
+	if err != nil {
+		t.Fatalf("Error when marking PAT used: %s", err)
+	}
+
+	account, err = am.Store.GetAccount("account_id")
+	if err != nil {
+		t.Fatalf("Error when getting account: %s", err)
+	}
+	assert.True(t, !account.Users["someUser"].PATs["tokenId"].LastUsed.IsZero())
+}
+
 func TestAccountManager_PrivateAccount(t *testing.T) {
 	manager, err := createManager(t)
 	if err != nil {
@@ -542,10 +734,9 @@ func TestAccountManager_AddPeer(t *testing.T) {
 	expectedPeerKey := key.PublicKey().String()
 	expectedSetupKey := setupKey.Key
 
-	peer, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  expectedPeerKey,
-		Meta: PeerSystemMeta{},
-		Name: expectedPeerKey,
+		Meta: PeerSystemMeta{Hostname: expectedPeerKey},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -611,10 +802,9 @@ func TestAccountManager_AddPeerWithUserID(t *testing.T) {
 	expectedPeerKey := key.PublicKey().String()
 	expectedUserID := userID
 
-	peer, err := manager.AddPeer("", userID, &Peer{
+	peer, _, err := manager.AddPeer("", userID, &Peer{
 		Key:  expectedPeerKey,
-		Meta: PeerSystemMeta{},
-		Name: expectedPeerKey,
+		Meta: PeerSystemMeta{Hostname: expectedPeerKey},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v, account users: %v", err, account.CreatedBy)
@@ -694,10 +884,9 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		}
 		expectedPeerKey := key.PublicKey().String()
 
-		peer, err := manager.AddPeer(setupKey.Key, "", &Peer{
+		peer, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
 			Key:  expectedPeerKey,
-			Meta: PeerSystemMeta{},
-			Name: expectedPeerKey,
+			Meta: PeerSystemMeta{Hostname: expectedPeerKey},
 		})
 		if err != nil {
 			t.Fatalf("expecting peer1 to be added, got failure %v", err)
@@ -726,10 +915,20 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		Peers: []string{peer1.ID, peer2.ID, peer3.ID},
 	}
 
-	rule := Rule{
-		Source:      []string{"group-id"},
-		Destination: []string{"group-id"},
-		Flow:        TrafficFlowBidirect,
+	policy := Policy{
+		Enabled: true,
+		Rules: []*PolicyRule{
+			{
+				Enabled:      true,
+				Sources:      []string{"group-id"},
+				Destinations: []string{"group-id"},
+				Action:       PolicyTrafficActionAccept,
+			},
+		},
+	}
+	if err := policy.UpdateQueryFromRules(); err != nil {
+		t.Errorf("update policy query from rules: %v", err)
+		return
 	}
 
 	wg := sync.WaitGroup{}
@@ -753,7 +952,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		wg.Wait()
 	})
 
-	t.Run("delete rule update", func(t *testing.T) {
+	t.Run("delete policy update", func(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -765,12 +964,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 			}
 		}()
 
-		var defaultRule *Rule
-		for _, r := range account.Rules {
-			defaultRule = r
-		}
-
-		if err := manager.DeleteRule(account.Id, defaultRule.ID, userID); err != nil {
+		if err := manager.DeletePolicy(account.Id, account.Policies[0].ID, userID); err != nil {
 			t.Errorf("delete default rule: %v", err)
 			return
 		}
@@ -778,7 +972,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		wg.Wait()
 	})
 
-	t.Run("save rule update", func(t *testing.T) {
+	t.Run("save policy update", func(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -790,7 +984,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 			}
 		}()
 
-		if err := manager.SaveRule(account.Id, userID, &rule); err != nil {
+		if err := manager.SavePolicy(account.Id, userID, &policy); err != nil {
 			t.Errorf("delete default rule: %v", err)
 			return
 		}
@@ -831,7 +1025,7 @@ func TestAccountManager_NetworkUpdates(t *testing.T) {
 		}()
 
 		if err := manager.DeleteGroup(account.Id, group.ID); err != nil {
-			t.Errorf("delete group rule: %v", err)
+			t.Errorf("delete group: %v", err)
 			return
 		}
 
@@ -864,10 +1058,9 @@ func TestAccountManager_DeletePeer(t *testing.T) {
 
 	peerKey := key.PublicKey().String()
 
-	peer, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
 		Key:  peerKey,
-		Meta: PeerSystemMeta{},
-		Name: peerKey,
+		Meta: PeerSystemMeta{Hostname: peerKey},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -899,6 +1092,7 @@ func TestAccountManager_DeletePeer(t *testing.T) {
 	assert.Equal(t, peer.IP.String(), ev.TargetID)
 	assert.Equal(t, peer.IP.String(), fmt.Sprint(ev.Meta["ip"]))
 }
+
 func getEvent(t *testing.T, accountID string, manager AccountManager, eventType activity.Activity) *activity.Event {
 	for {
 		select {
@@ -949,146 +1143,6 @@ func TestGetUsersFromAccount(t *testing.T) {
 		assert.Equal(t, userInfo.Name, "")
 		assert.Equal(t, userInfo.Email, "")
 	}
-}
-
-func TestAccountManager_UpdatePeerMeta(t *testing.T) {
-	manager, err := createManager(t)
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
-	account, err := createAccount(manager, "test_account", "account_creator", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var setupKey *SetupKey
-	for _, key := range account.SetupKeys {
-		setupKey = key
-	}
-
-	key, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
-	peer, err := manager.AddPeer(setupKey.Key, "", &Peer{
-		Key: key.PublicKey().String(),
-		Meta: PeerSystemMeta{
-			Hostname:  "Hostname",
-			GoOS:      "GoOS",
-			Kernel:    "Kernel",
-			Core:      "Core",
-			Platform:  "Platform",
-			OS:        "OS",
-			WtVersion: "WtVersion",
-		},
-		Name: key.PublicKey().String(),
-	})
-	if err != nil {
-		t.Errorf("expecting peer to be added, got failure %v", err)
-		return
-	}
-
-	newMeta := PeerSystemMeta{
-		Hostname:  "new-Hostname",
-		GoOS:      "new-GoOS",
-		Kernel:    "new-Kernel",
-		Core:      "new-Core",
-		Platform:  "new-Platform",
-		OS:        "new-OS",
-		WtVersion: "new-WtVersion",
-	}
-	err = manager.UpdatePeerMeta(peer.ID, newMeta)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
-	p, err := manager.GetPeerByKey(peer.Key)
-	if err != nil {
-		return
-	}
-
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
-	assert.Equal(t, newMeta, p.Meta)
-}
-
-func TestAccount_GetPeerRules(t *testing.T) {
-
-	groups := map[string]*Group{
-		"group_1": {
-			ID:    "group_1",
-			Name:  "group_1",
-			Peers: []string{"peer-1", "peer-2"},
-		},
-		"group_2": {
-			ID:    "group_2",
-			Name:  "group_2",
-			Peers: []string{"peer-2", "peer-3"},
-		},
-		"group_3": {
-			ID:    "group_3",
-			Name:  "group_3",
-			Peers: []string{"peer-4"},
-		},
-		"group_4": {
-			ID:    "group_4",
-			Name:  "group_4",
-			Peers: []string{"peer-1"},
-		},
-		"group_5": {
-			ID:    "group_5",
-			Name:  "group_5",
-			Peers: []string{"peer-1"},
-		},
-	}
-	rules := map[string]*Rule{
-		"rule-1": {
-			ID:          "rule-1",
-			Name:        "rule-1",
-			Description: "rule-1",
-			Disabled:    false,
-			Source:      []string{"group_1", "group_5"},
-			Destination: []string{"group_2"},
-			Flow:        0,
-		},
-		"rule-2": {
-			ID:          "rule-2",
-			Name:        "rule-2",
-			Description: "rule-2",
-			Disabled:    false,
-			Source:      []string{"group_1"},
-			Destination: []string{"group_1"},
-			Flow:        0,
-		},
-		"rule-3": {
-			ID:          "rule-3",
-			Name:        "rule-3",
-			Description: "rule-3",
-			Disabled:    false,
-			Source:      []string{"group_3"},
-			Destination: []string{"group_3"},
-			Flow:        0,
-		},
-	}
-
-	account := &Account{
-		Groups: groups,
-		Rules:  rules,
-	}
-
-	srcRules, dstRules := account.GetPeerRules("peer-1")
-
-	assert.Equal(t, 2, len(srcRules))
-	assert.Equal(t, 1, len(dstRules))
-
 }
 
 func TestFileStore_GetRoutesByPrefix(t *testing.T) {
@@ -1229,6 +1283,17 @@ func TestAccount_Copy(t *testing.T) {
 				Id:         "user1",
 				Role:       UserRoleAdmin,
 				AutoGroups: []string{"group1"},
+				PATs: map[string]*PersonalAccessToken{
+					"pat1": {
+						ID:             "pat1",
+						Name:           "First PAT",
+						HashedToken:    "SoMeHaShEdToKeN",
+						ExpirationDate: time.Now().AddDate(0, 0, 7),
+						CreatedBy:      "user1",
+						CreatedAt:      time.Now(),
+						LastUsed:       time.Now(),
+					},
+				},
 			},
 		},
 		Groups: map[string]*Group{
@@ -1241,6 +1306,12 @@ func TestAccount_Copy(t *testing.T) {
 				ID: "rule1",
 			},
 		},
+		Policies: []*Policy{
+			{
+				ID:      "policy1",
+				Enabled: true,
+			},
+		},
 		Routes: map[string]*route.Route{
 			"route1": {
 				ID: "route1",
@@ -1251,7 +1322,8 @@ func TestAccount_Copy(t *testing.T) {
 				ID: "nsGroup1",
 			},
 		},
-		DNSSettings: &DNSSettings{},
+		DNSSettings: &DNSSettings{DisabledManagementGroups: []string{}},
+		Settings:    &Settings{},
 	}
 	err := hasNilField(account)
 	if err != nil {
@@ -1283,6 +1355,509 @@ func hasNilField(x interface{}) error {
 	return nil
 }
 
+func TestDefaultAccountManager_DefaultAccountSettings(t *testing.T) {
+	manager, err := createManager(t)
+	require.NoError(t, err, "unable to create account manager")
+
+	account, err := manager.GetAccountByUserOrAccountID(userID, "", "")
+	require.NoError(t, err, "unable to create an account")
+
+	assert.NotNil(t, account.Settings)
+	assert.Equal(t, account.Settings.PeerLoginExpirationEnabled, true)
+	assert.Equal(t, account.Settings.PeerLoginExpiration, 24*time.Hour)
+}
+
+func TestDefaultAccountManager_UpdatePeer_PeerLoginExpiration(t *testing.T) {
+	manager, err := createManager(t)
+	require.NoError(t, err, "unable to create account manager")
+	account, err := manager.GetAccountByUserOrAccountID(userID, "", "")
+	require.NoError(t, err, "unable to create an account")
+
+	key, err := wgtypes.GenerateKey()
+	require.NoError(t, err, "unable to generate WireGuard key")
+	peer, _, err := manager.AddPeer("", userID, &Peer{
+		Key:                    key.PublicKey().String(),
+		Meta:                   PeerSystemMeta{Hostname: "test-peer"},
+		LoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "unable to add peer")
+	err = manager.MarkPeerConnected(key.PublicKey().String(), true)
+	require.NoError(t, err, "unable to mark peer connected")
+	account, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour,
+		PeerLoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "expecting to update account settings successfully but got error")
+
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	manager.peerLoginExpiry = &MockScheduler{
+		CancelFunc: func(IDs []string) {
+			wg.Done()
+		},
+		ScheduleFunc: func(in time.Duration, ID string, job func() (nextRunIn time.Duration, reschedule bool)) {
+			wg.Done()
+		},
+	}
+
+	// disable expiration first
+	update := peer.Copy()
+	update.LoginExpirationEnabled = false
+	_, err = manager.UpdatePeer(account.Id, userID, update)
+	require.NoError(t, err, "unable to update peer")
+	// enabling expiration should trigger the routine
+	update.LoginExpirationEnabled = true
+	_, err = manager.UpdatePeer(account.Id, userID, update)
+	require.NoError(t, err, "unable to update peer")
+
+	failed := waitTimeout(wg, time.Second)
+	if failed {
+		t.Fatal("timeout while waiting for test to finish")
+	}
+}
+
+func TestDefaultAccountManager_MarkPeerConnected_PeerLoginExpiration(t *testing.T) {
+	manager, err := createManager(t)
+	require.NoError(t, err, "unable to create account manager")
+	account, err := manager.GetAccountByUserOrAccountID(userID, "", "")
+	require.NoError(t, err, "unable to create an account")
+
+	key, err := wgtypes.GenerateKey()
+	require.NoError(t, err, "unable to generate WireGuard key")
+	_, _, err = manager.AddPeer("", userID, &Peer{
+		Key:                    key.PublicKey().String(),
+		Meta:                   PeerSystemMeta{Hostname: "test-peer"},
+		LoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "unable to add peer")
+	_, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour,
+		PeerLoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "expecting to update account settings successfully but got error")
+
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	manager.peerLoginExpiry = &MockScheduler{
+		CancelFunc: func(IDs []string) {
+			wg.Done()
+		},
+		ScheduleFunc: func(in time.Duration, ID string, job func() (nextRunIn time.Duration, reschedule bool)) {
+			wg.Done()
+		},
+	}
+
+	// when we mark peer as connected, the peer login expiration routine should trigger
+	err = manager.MarkPeerConnected(key.PublicKey().String(), true)
+	require.NoError(t, err, "unable to mark peer connected")
+
+	failed := waitTimeout(wg, time.Second)
+	if failed {
+		t.Fatal("timeout while waiting for test to finish")
+	}
+}
+
+func TestDefaultAccountManager_UpdateAccountSettings_PeerLoginExpiration(t *testing.T) {
+	manager, err := createManager(t)
+	require.NoError(t, err, "unable to create account manager")
+	account, err := manager.GetAccountByUserOrAccountID(userID, "", "")
+	require.NoError(t, err, "unable to create an account")
+
+	key, err := wgtypes.GenerateKey()
+	require.NoError(t, err, "unable to generate WireGuard key")
+	_, _, err = manager.AddPeer("", userID, &Peer{
+		Key:                    key.PublicKey().String(),
+		Meta:                   PeerSystemMeta{Hostname: "test-peer"},
+		LoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "unable to add peer")
+	err = manager.MarkPeerConnected(key.PublicKey().String(), true)
+	require.NoError(t, err, "unable to mark peer connected")
+
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	manager.peerLoginExpiry = &MockScheduler{
+		CancelFunc: func(IDs []string) {
+			wg.Done()
+		},
+		ScheduleFunc: func(in time.Duration, ID string, job func() (nextRunIn time.Duration, reschedule bool)) {
+			wg.Done()
+		},
+	}
+	// enabling PeerLoginExpirationEnabled should trigger the expiration job
+	account, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour,
+		PeerLoginExpirationEnabled: true,
+	})
+	require.NoError(t, err, "expecting to update account settings successfully but got error")
+
+	failed := waitTimeout(wg, time.Second)
+	if failed {
+		t.Fatal("timeout while waiting for test to finish")
+	}
+	wg.Add(1)
+
+	// disabling PeerLoginExpirationEnabled should trigger cancel
+	_, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour,
+		PeerLoginExpirationEnabled: false,
+	})
+	require.NoError(t, err, "expecting to update account settings successfully but got error")
+	failed = waitTimeout(wg, time.Second)
+	if failed {
+		t.Fatal("timeout while waiting for test to finish")
+	}
+}
+
+func TestDefaultAccountManager_UpdateAccountSettings(t *testing.T) {
+	manager, err := createManager(t)
+	require.NoError(t, err, "unable to create account manager")
+
+	account, err := manager.GetAccountByUserOrAccountID(userID, "", "")
+	require.NoError(t, err, "unable to create an account")
+
+	updated, err := manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour,
+		PeerLoginExpirationEnabled: false,
+	})
+	require.NoError(t, err, "expecting to update account settings successfully but got error")
+	assert.False(t, updated.Settings.PeerLoginExpirationEnabled)
+	assert.Equal(t, updated.Settings.PeerLoginExpiration, time.Hour)
+
+	account, err = manager.GetAccountByUserOrAccountID("", account.Id, "")
+	require.NoError(t, err, "unable to get account by ID")
+
+	assert.False(t, account.Settings.PeerLoginExpirationEnabled)
+	assert.Equal(t, account.Settings.PeerLoginExpiration, time.Hour)
+
+	_, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Second,
+		PeerLoginExpirationEnabled: false,
+	})
+	require.Error(t, err, "expecting to fail when providing PeerLoginExpiration less than one hour")
+
+	_, err = manager.UpdateAccountSettings(account.Id, userID, &Settings{
+		PeerLoginExpiration:        time.Hour * 24 * 181,
+		PeerLoginExpirationEnabled: false,
+	})
+	require.Error(t, err, "expecting to fail when providing PeerLoginExpiration more than 180 days")
+}
+
+func TestAccount_GetExpiredPeers(t *testing.T) {
+	type test struct {
+		name          string
+		peers         map[string]*Peer
+		expectedPeers map[string]struct{}
+	}
+	testCases := []test{
+		{
+			name: "Peers with login expiration disabled, no expired peers",
+			peers: map[string]*Peer{
+				"peer-1": {
+					LoginExpirationEnabled: false,
+				},
+				"peer-2": {
+					LoginExpirationEnabled: false,
+				},
+			},
+			expectedPeers: map[string]struct{}{},
+		},
+		{
+			name: "Two peers expired",
+			peers: map[string]*Peer{
+				"peer-1": {
+					ID:                     "peer-1",
+					LoginExpirationEnabled: true,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LastLogin: time.Now().Add(-30 * time.Minute),
+					UserID:    userID,
+				},
+				"peer-2": {
+					ID:                     "peer-2",
+					LoginExpirationEnabled: true,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LastLogin: time.Now().Add(-2 * time.Hour),
+					UserID:    userID,
+				},
+
+				"peer-3": {
+					ID:                     "peer-3",
+					LoginExpirationEnabled: true,
+					Status: &PeerStatus{
+						LastSeen:     time.Now(),
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LastLogin: time.Now().Add(-1 * time.Hour),
+					UserID:    userID,
+				},
+			},
+			expectedPeers: map[string]struct{}{
+				"peer-2": {},
+				"peer-3": {},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			account := &Account{
+				Peers: testCase.peers,
+				Settings: &Settings{
+					PeerLoginExpirationEnabled: true,
+					PeerLoginExpiration:        time.Hour,
+				},
+			}
+
+			expiredPeers := account.GetExpiredPeers()
+			assert.Len(t, expiredPeers, len(testCase.expectedPeers))
+			for _, peer := range expiredPeers {
+				if _, ok := testCase.expectedPeers[peer.ID]; !ok {
+					t.Fatalf("expected to have peer %s expired", peer.ID)
+				}
+			}
+		})
+	}
+}
+
+func TestAccount_GetPeersWithExpiration(t *testing.T) {
+	type test struct {
+		name          string
+		peers         map[string]*Peer
+		expectedPeers map[string]struct{}
+	}
+
+	testCases := []test{
+		{
+			name:          "No account peers, no peers with expiration",
+			peers:         map[string]*Peer{},
+			expectedPeers: map[string]struct{}{},
+		},
+		{
+			name: "Peers with login expiration disabled, no peers with expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+				"peer-2": {
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+			},
+			expectedPeers: map[string]struct{}{},
+		},
+		{
+			name: "Peers with login expiration enabled, return peers with expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					ID:                     "peer-1",
+					LoginExpirationEnabled: true,
+					UserID:                 userID,
+				},
+				"peer-2": {
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+			},
+			expectedPeers: map[string]struct{}{
+				"peer-1": {},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			account := &Account{
+				Peers: testCase.peers,
+			}
+
+			actual := account.GetPeersWithExpiration()
+			assert.Len(t, actual, len(testCase.expectedPeers))
+			if len(testCase.expectedPeers) > 0 {
+				for k := range testCase.expectedPeers {
+					contains := false
+					for _, peer := range actual {
+						if k == peer.ID {
+							contains = true
+						}
+					}
+					assert.True(t, contains)
+				}
+			}
+		})
+	}
+}
+
+func TestAccount_GetNextPeerExpiration(t *testing.T) {
+	type test struct {
+		name                   string
+		peers                  map[string]*Peer
+		expiration             time.Duration
+		expirationEnabled      bool
+		expectedNextRun        bool
+		expectedNextExpiration time.Duration
+	}
+
+	expectedNextExpiration := time.Minute
+	testCases := []test{
+		{
+			name:                   "No peers, no expiration",
+			peers:                  map[string]*Peer{},
+			expiration:             time.Second,
+			expirationEnabled:      false,
+			expectedNextRun:        false,
+			expectedNextExpiration: time.Duration(0),
+		},
+		{
+			name: "No connected peers, no expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					Status: &PeerStatus{
+						Connected: false,
+					},
+					LoginExpirationEnabled: true,
+					UserID:                 userID,
+				},
+				"peer-2": {
+					Status: &PeerStatus{
+						Connected: true,
+					},
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+			},
+			expiration:             time.Second,
+			expirationEnabled:      false,
+			expectedNextRun:        false,
+			expectedNextExpiration: time.Duration(0),
+		},
+		{
+			name: "Connected peers with disabled expiration, no expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					Status: &PeerStatus{
+						Connected: true,
+					},
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+				"peer-2": {
+					Status: &PeerStatus{
+						Connected: true,
+					},
+					LoginExpirationEnabled: false,
+					UserID:                 userID,
+				},
+			},
+			expiration:             time.Second,
+			expirationEnabled:      false,
+			expectedNextRun:        false,
+			expectedNextExpiration: time.Duration(0),
+		},
+		{
+			name: "Expired peers, no expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: true,
+					},
+					LoginExpirationEnabled: true,
+					UserID:                 userID,
+				},
+				"peer-2": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: true,
+					},
+					LoginExpirationEnabled: true,
+					UserID:                 userID,
+				},
+			},
+			expiration:             time.Second,
+			expirationEnabled:      false,
+			expectedNextRun:        false,
+			expectedNextExpiration: time.Duration(0),
+		},
+		{
+			name: "To be expired peer, return expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LoginExpirationEnabled: true,
+					LastLogin:              time.Now(),
+					UserID:                 userID,
+				},
+				"peer-2": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: true,
+					},
+					LoginExpirationEnabled: true,
+					UserID:                 userID,
+				},
+			},
+			expiration:             time.Minute,
+			expirationEnabled:      false,
+			expectedNextRun:        true,
+			expectedNextExpiration: expectedNextExpiration,
+		},
+		{
+			name: "Peers added with setup keys, no expiration",
+			peers: map[string]*Peer{
+				"peer-1": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LoginExpirationEnabled: true,
+					SetupKey:               "key",
+				},
+				"peer-2": {
+					Status: &PeerStatus{
+						Connected:    true,
+						LoginExpired: false,
+					},
+					LoginExpirationEnabled: true,
+					SetupKey:               "key",
+				},
+			},
+			expiration:             time.Second,
+			expirationEnabled:      false,
+			expectedNextRun:        false,
+			expectedNextExpiration: time.Duration(0),
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			account := &Account{
+				Peers:    testCase.peers,
+				Settings: &Settings{PeerLoginExpiration: testCase.expiration, PeerLoginExpirationEnabled: testCase.expirationEnabled},
+			}
+
+			expiration, ok := account.GetNextPeerExpiration()
+			assert.Equal(t, ok, testCase.expectedNextRun)
+			if testCase.expectedNextRun {
+				assert.True(t, expiration >= 0 && expiration <= testCase.expectedNextExpiration)
+			} else {
+				assert.Equal(t, expiration, testCase.expectedNextExpiration)
+			}
+		})
+	}
+}
+
 func createManager(t *testing.T) (*DefaultAccountManager, error) {
 	store, err := createStore(t)
 	if err != nil {
@@ -1300,4 +1875,18 @@ func createStore(t *testing.T) (Store, error) {
 	}
 
 	return store, nil
+}
+
+func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
+	select {
+	case <-c:
+		return false
+	case <-time.After(timeout):
+		return true
+	}
 }

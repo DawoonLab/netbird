@@ -3,16 +3,6 @@ package internal
 import (
 	"context"
 	"fmt"
-	"github.com/netbirdio/netbird/client/internal/dns"
-	"github.com/netbirdio/netbird/client/internal/routemanager"
-	"github.com/netbirdio/netbird/client/ssh"
-	nbstatus "github.com/netbirdio/netbird/client/status"
-	nbdns "github.com/netbirdio/netbird/dns"
-	"github.com/netbirdio/netbird/iface"
-	"github.com/netbirdio/netbird/management/server/activity"
-	"github.com/netbirdio/netbird/route"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"net"
 	"net/netip"
 	"os"
@@ -23,18 +13,29 @@ import (
 	"testing"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+
+	"github.com/netbirdio/netbird/client/internal/dns"
+	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/routemanager"
+	"github.com/netbirdio/netbird/client/ssh"
 	"github.com/netbirdio/netbird/client/system"
+	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/iface"
 	mgmt "github.com/netbirdio/netbird/management/client"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
 	"github.com/netbirdio/netbird/management/server"
+	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/route"
 	signal "github.com/netbirdio/netbird/signal/client"
 	"github.com/netbirdio/netbird/signal/proto"
 	signalServer "github.com/netbirdio/netbird/signal/server"
 	"github.com/netbirdio/netbird/util"
-	log "github.com/sirupsen/logrus"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 )
 
 var (
@@ -71,7 +72,7 @@ func TestEngine_SSH(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, nbstatus.NewRecorder())
+	}, peer.NewRecorder("https://mgm"))
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -205,8 +206,8 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, nbstatus.NewRecorder())
-	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU)
+	}, peer.NewRecorder("https://mgm"))
+	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU, nil)
 	engine.routeManager = routemanager.NewManager(ctx, key.PublicKey().String(), engine.wgInterface, engine.statusRecorder)
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -389,7 +390,7 @@ func TestEngine_Sync(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, nbstatus.NewRecorder())
+	}, peer.NewRecorder("https://mgm"))
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -439,7 +440,7 @@ func TestEngine_Sync(t *testing.T) {
 		default:
 		}
 
-		if len(engine.GetPeers()) == 3 && engine.networkSerial == 10 {
+		if getPeers(engine) == 3 && engine.networkSerial == 10 {
 			break
 		}
 	}
@@ -547,8 +548,8 @@ func TestEngine_UpdateNetworkMapWithRoutes(t *testing.T) {
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, nbstatus.NewRecorder())
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU)
+			}, peer.NewRecorder("https://mgm"))
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil)
 			assert.NoError(t, err, "shouldn't return error")
 			input := struct {
 				inputSerial uint64
@@ -712,8 +713,8 @@ func TestEngine_UpdateNetworkMapWithDNSUpdate(t *testing.T) {
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, nbstatus.NewRecorder())
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU)
+			}, peer.NewRecorder("https://mgm"))
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil)
 			assert.NoError(t, err, "shouldn't return error")
 
 			mockRouteManager := &routemanager.MockManager{
@@ -846,7 +847,7 @@ loop:
 		case <-ticker.C:
 			totalConnected := 0
 			for _, engine := range engines {
-				totalConnected = totalConnected + len(engine.GetConnectedPeers())
+				totalConnected = totalConnected + getConnectedPeers(engine)
 			}
 			if totalConnected == expectedConnected {
 				log.Infof("total connected=%d", totalConnected)
@@ -857,7 +858,7 @@ loop:
 	}
 	// cleanup test
 	for n, peerEngine := range engines {
-		t.Logf("stopping peer with interface %s from multipeer test, loopIndex %d", peerEngine.wgInterface.Name, n)
+		t.Logf("stopping peer with interface %s from multipeer test, loopIndex %d", peerEngine.wgInterface.Name(), n)
 		errStop := peerEngine.mgmClient.Close()
 		if errStop != nil {
 			log.Infoln("got error trying to close management clients from engine: ", errStop)
@@ -905,7 +906,7 @@ func Test_ParseNATExternalIPMappings(t *testing.T) {
 			expectedOutput:          []string{"1.1.1.1", "8.8.8.8/" + testingIP},
 		},
 		{
-			name:                    "Only Interface Name Should Return Nil",
+			name:                    "Only Interface name Should Return Nil",
 			inputBlacklistInterface: defaultInterfaceBlacklist,
 			inputMapList:            []string{testingInterface},
 			expectedOutput:          nil,
@@ -977,7 +978,7 @@ func createEngine(ctx context.Context, cancel context.CancelFunc, setupKey strin
 		WgPort:       wgPort,
 	}
 
-	return NewEngine(ctx, cancel, signalClient, mgmtClient, conf, nbstatus.NewRecorder()), nil
+	return NewEngine(ctx, cancel, signalClient, mgmtClient, conf, peer.NewRecorder("https://mgm")), nil
 }
 
 func startSignal() (*grpc.Server, string, error) {
@@ -1043,4 +1044,24 @@ func startManagement(dataDir string) (*grpc.Server, string, error) {
 	}()
 
 	return s, lis.Addr().String(), nil
+}
+
+// getConnectedPeers returns a connection Status or nil if peer connection wasn't found
+func getConnectedPeers(e *Engine) int {
+	e.syncMsgMux.Lock()
+	defer e.syncMsgMux.Unlock()
+	i := 0
+	for _, conn := range e.peerConns {
+		if conn.Status() == peer.StatusConnected {
+			i++
+		}
+	}
+	return i
+}
+
+func getPeers(e *Engine) int {
+	e.syncMsgMux.Lock()
+	defer e.syncMsgMux.Unlock()
+
+	return len(e.peerConns)
 }

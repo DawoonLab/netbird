@@ -4,10 +4,12 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/rs/cors"
+
 	s "github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/http/middleware"
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/telemetry"
-	"github.com/rs/cors"
 )
 
 // AuthCfg contains parameters for authentication middleware
@@ -18,15 +20,23 @@ type AuthCfg struct {
 	KeysLocation string
 }
 
+type apiHandler struct {
+	Router         *mux.Router
+	AccountManager s.AccountManager
+	AuthCfg        AuthCfg
+}
+
+// EmptyObject is an empty struct used to return empty JSON object
+type emptyObject struct {
+}
+
 // APIHandler creates the Management service HTTP API handler registering all the available endpoints.
-func APIHandler(accountManager s.AccountManager, appMetrics telemetry.AppMetrics, authCfg AuthCfg) (http.Handler, error) {
-	jwtMiddleware, err := middleware.NewJwtMiddleware(
-		authCfg.Issuer,
-		authCfg.Audience,
-		authCfg.KeysLocation)
-	if err != nil {
-		return nil, err
-	}
+func APIHandler(accountManager s.AccountManager, jwtValidator jwtclaims.JWTValidator, appMetrics telemetry.AppMetrics, authCfg AuthCfg) (http.Handler, error) {
+	authMiddleware := middleware.NewAuthMiddleware(
+		accountManager.GetAccountFromPAT,
+		jwtValidator.ValidateAndParse,
+		accountManager.MarkPATUsed,
+		authCfg.Audience)
 
 	corsMiddleware := cors.AllowAll()
 
@@ -38,65 +48,29 @@ func APIHandler(accountManager s.AccountManager, appMetrics telemetry.AppMetrics
 	rootRouter := mux.NewRouter()
 	metricsMiddleware := appMetrics.HTTPMiddleware()
 
-	apiHandler := rootRouter.PathPrefix("/api").Subrouter()
-	apiHandler.Use(metricsMiddleware.Handler, corsMiddleware.Handler, jwtMiddleware.Handler, acMiddleware.Handler)
+	router := rootRouter.PathPrefix("/api").Subrouter()
+	router.Use(metricsMiddleware.Handler, corsMiddleware.Handler, authMiddleware.Handler, acMiddleware.Handler)
 
-	groupsHandler := NewGroups(accountManager, authCfg)
-	rulesHandler := NewRules(accountManager, authCfg)
-	peersHandler := NewPeers(accountManager, authCfg)
-	keysHandler := NewSetupKeysHandler(accountManager, authCfg)
-	userHandler := NewUserHandler(accountManager, authCfg)
-	routesHandler := NewRoutes(accountManager, authCfg)
-	nameserversHandler := NewNameservers(accountManager, authCfg)
-	eventsHandler := NewEvents(accountManager, authCfg)
-	dnsSettingsHandler := NewDNSSettings(accountManager, authCfg)
+	api := apiHandler{
+		Router:         router,
+		AccountManager: accountManager,
+		AuthCfg:        authCfg,
+	}
 
-	apiHandler.HandleFunc("/peers", peersHandler.GetPeers).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/peers/{id}", peersHandler.HandlePeer).
-		Methods("GET", "PUT", "DELETE", "OPTIONS")
-	apiHandler.HandleFunc("/users", userHandler.GetUsers).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/users/{id}", userHandler.UpdateUser).Methods("PUT", "OPTIONS")
-	apiHandler.HandleFunc("/users", userHandler.CreateUserHandler).Methods("POST", "OPTIONS")
+	api.addAccountsEndpoint()
+	api.addPeersEndpoint()
+	api.addUsersEndpoint()
+	api.addUsersTokensEndpoint()
+	api.addSetupKeysEndpoint()
+	api.addRulesEndpoint()
+	api.addPoliciesEndpoint()
+	api.addGroupsEndpoint()
+	api.addRoutesEndpoint()
+	api.addDNSNameserversEndpoint()
+	api.addDNSSettingEndpoint()
+	api.addEventsEndpoint()
 
-	apiHandler.HandleFunc("/setup-keys", keysHandler.GetAllSetupKeysHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/setup-keys", keysHandler.CreateSetupKeyHandler).Methods("POST", "OPTIONS")
-	apiHandler.HandleFunc("/setup-keys/{id}", keysHandler.GetSetupKeyHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/setup-keys/{id}", keysHandler.UpdateSetupKeyHandler).Methods("PUT", "OPTIONS")
-
-	apiHandler.HandleFunc("/rules", rulesHandler.GetAllRulesHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/rules", rulesHandler.CreateRuleHandler).Methods("POST", "OPTIONS")
-	apiHandler.HandleFunc("/rules/{id}", rulesHandler.UpdateRuleHandler).Methods("PUT", "OPTIONS")
-	apiHandler.HandleFunc("/rules/{id}", rulesHandler.PatchRuleHandler).Methods("PATCH", "OPTIONS")
-	apiHandler.HandleFunc("/rules/{id}", rulesHandler.GetRuleHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/rules/{id}", rulesHandler.DeleteRuleHandler).Methods("DELETE", "OPTIONS")
-
-	apiHandler.HandleFunc("/groups", groupsHandler.GetAllGroupsHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/groups", groupsHandler.CreateGroupHandler).Methods("POST", "OPTIONS")
-	apiHandler.HandleFunc("/groups/{id}", groupsHandler.UpdateGroupHandler).Methods("PUT", "OPTIONS")
-	apiHandler.HandleFunc("/groups/{id}", groupsHandler.PatchGroupHandler).Methods("PATCH", "OPTIONS")
-	apiHandler.HandleFunc("/groups/{id}", groupsHandler.GetGroupHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/groups/{id}", groupsHandler.DeleteGroupHandler).Methods("DELETE", "OPTIONS")
-
-	apiHandler.HandleFunc("/routes", routesHandler.GetAllRoutesHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/routes", routesHandler.CreateRouteHandler).Methods("POST", "OPTIONS")
-	apiHandler.HandleFunc("/routes/{id}", routesHandler.UpdateRouteHandler).Methods("PUT", "OPTIONS")
-	apiHandler.HandleFunc("/routes/{id}", routesHandler.PatchRouteHandler).Methods("PATCH", "OPTIONS")
-	apiHandler.HandleFunc("/routes/{id}", routesHandler.GetRouteHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/routes/{id}", routesHandler.DeleteRouteHandler).Methods("DELETE", "OPTIONS")
-
-	apiHandler.HandleFunc("/dns/nameservers", nameserversHandler.GetAllNameserversHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/dns/nameservers", nameserversHandler.CreateNameserverGroupHandler).Methods("POST", "OPTIONS")
-	apiHandler.HandleFunc("/dns/nameservers/{id}", nameserversHandler.UpdateNameserverGroupHandler).Methods("PUT", "OPTIONS")
-	apiHandler.HandleFunc("/dns/nameservers/{id}", nameserversHandler.PatchNameserverGroupHandler).Methods("PATCH", "OPTIONS")
-	apiHandler.HandleFunc("/dns/nameservers/{id}", nameserversHandler.GetNameserverGroupHandler).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/dns/nameservers/{id}", nameserversHandler.DeleteNameserverGroupHandler).Methods("DELETE", "OPTIONS")
-
-	apiHandler.HandleFunc("/events", eventsHandler.GetEvents).Methods("GET", "OPTIONS")
-
-	apiHandler.HandleFunc("/dns/settings", dnsSettingsHandler.GetDNSSettings).Methods("GET", "OPTIONS")
-	apiHandler.HandleFunc("/dns/settings", dnsSettingsHandler.UpdateDNSSettings).Methods("PUT", "OPTIONS")
-
-	err = apiHandler.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+	err := api.Router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
 		methods, err := route.GetMethods()
 		if err != nil {
 			return err
@@ -118,4 +92,99 @@ func APIHandler(accountManager s.AccountManager, appMetrics telemetry.AppMetrics
 	}
 
 	return rootRouter, nil
+}
+
+func (apiHandler *apiHandler) addAccountsEndpoint() {
+	accountsHandler := NewAccountsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/accounts/{id}", accountsHandler.UpdateAccount).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/accounts", accountsHandler.GetAllAccounts).Methods("GET", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addPeersEndpoint() {
+	peersHandler := NewPeersHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/peers", peersHandler.GetAllPeers).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/peers/{id}", peersHandler.HandlePeer).
+		Methods("GET", "PUT", "DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addUsersEndpoint() {
+	userHandler := NewUsersHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/users", userHandler.GetAllUsers).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users/{id}", userHandler.UpdateUser).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users", userHandler.CreateUser).Methods("POST", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addUsersTokensEndpoint() {
+	tokenHandler := NewPATsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/users/{userId}/tokens", tokenHandler.GetAllTokens).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users/{userId}/tokens", tokenHandler.CreateToken).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users/{userId}/tokens/{tokenId}", tokenHandler.GetToken).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users/{userId}/tokens/{tokenId}", tokenHandler.DeleteToken).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addSetupKeysEndpoint() {
+	keysHandler := NewSetupKeysHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/setup-keys", keysHandler.GetAllSetupKeys).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/setup-keys", keysHandler.CreateSetupKey).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/setup-keys/{id}", keysHandler.GetSetupKey).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/setup-keys/{id}", keysHandler.UpdateSetupKey).Methods("PUT", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addRulesEndpoint() {
+	rulesHandler := NewRulesHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/rules", rulesHandler.GetAllRules).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/rules", rulesHandler.CreateRule).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/rules/{id}", rulesHandler.UpdateRule).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/rules/{id}", rulesHandler.GetRule).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/rules/{id}", rulesHandler.DeleteRule).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addPoliciesEndpoint() {
+	policiesHandler := NewPoliciesHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/policies", policiesHandler.GetAllPolicies).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/policies", policiesHandler.CreatePolicy).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/policies/{id}", policiesHandler.UpdatePolicy).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/policies/{id}", policiesHandler.GetPolicy).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/policies/{id}", policiesHandler.DeletePolicy).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addGroupsEndpoint() {
+	groupsHandler := NewGroupsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/groups", groupsHandler.GetAllGroups).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/groups", groupsHandler.CreateGroup).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/groups/{id}", groupsHandler.UpdateGroup).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/groups/{id}", groupsHandler.PatchGroup).Methods("PATCH", "OPTIONS")
+	apiHandler.Router.HandleFunc("/groups/{id}", groupsHandler.GetGroup).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/groups/{id}", groupsHandler.DeleteGroup).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addRoutesEndpoint() {
+	routesHandler := NewRoutesHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/routes", routesHandler.GetAllRoutes).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/routes", routesHandler.CreateRoute).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/routes/{id}", routesHandler.UpdateRoute).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/routes/{id}", routesHandler.PatchRoute).Methods("PATCH", "OPTIONS")
+	apiHandler.Router.HandleFunc("/routes/{id}", routesHandler.GetRoute).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/routes/{id}", routesHandler.DeleteRoute).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addDNSNameserversEndpoint() {
+	nameserversHandler := NewNameserversHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/dns/nameservers", nameserversHandler.GetAllNameservers).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/nameservers", nameserversHandler.CreateNameserverGroup).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/nameservers/{id}", nameserversHandler.UpdateNameserverGroup).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/nameservers/{id}", nameserversHandler.PatchNameserverGroup).Methods("PATCH", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/nameservers/{id}", nameserversHandler.GetNameserverGroup).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/nameservers/{id}", nameserversHandler.DeleteNameserverGroup).Methods("DELETE", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addDNSSettingEndpoint() {
+	dnsSettingsHandler := NewDNSSettingsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/dns/settings", dnsSettingsHandler.GetDNSSettings).Methods("GET", "OPTIONS")
+	apiHandler.Router.HandleFunc("/dns/settings", dnsSettingsHandler.UpdateDNSSettings).Methods("PUT", "OPTIONS")
+}
+
+func (apiHandler *apiHandler) addEventsEndpoint() {
+	eventsHandler := NewEventsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
+	apiHandler.Router.HandleFunc("/events", eventsHandler.GetAllEvents).Methods("GET", "OPTIONS")
 }

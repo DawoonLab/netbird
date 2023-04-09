@@ -3,10 +3,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/skratchdot/open-golang/open"
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
-	"time"
 
 	"github.com/netbirdio/netbird/util"
 
@@ -38,7 +39,7 @@ var loginCmd = &cobra.Command{
 				return err
 			}
 
-			config, err := internal.GetConfig(internal.ConfigInput{
+			config, err := internal.UpdateOrCreateConfig(internal.ConfigInput{
 				ManagementURL: managementURL,
 				AdminURL:      adminURL,
 				ConfigPath:    configPath,
@@ -134,7 +135,7 @@ func foregroundLogin(ctx context.Context, cmd *cobra.Command, config *internal.C
 		if err != nil {
 			return fmt.Errorf("interactive sso login failed: %v", err)
 		}
-		jwtToken = tokenInfo.AccessToken
+		jwtToken = tokenInfo.GetTokenToUse()
 	}
 
 	err = WithBackOff(func() error {
@@ -152,7 +153,7 @@ func foregroundLogin(ctx context.Context, cmd *cobra.Command, config *internal.C
 }
 
 func foregroundGetTokenInfo(ctx context.Context, cmd *cobra.Command, config *internal.Config) (*internal.TokenInfo, error) {
-	providerConfig, err := internal.GetDeviceAuthorizationFlowInfo(ctx, config)
+	providerConfig, err := internal.GetDeviceAuthorizationFlowInfo(ctx, config.PrivateKey, config.ManagementURL)
 	if err != nil {
 		s, ok := gstatus.FromError(err)
 		if ok && s.Code() == codes.NotFound {
@@ -171,12 +172,7 @@ func foregroundGetTokenInfo(ctx context.Context, cmd *cobra.Command, config *int
 		}
 	}
 
-	hostedClient := internal.NewHostedDeviceFlow(
-		providerConfig.ProviderConfig.Audience,
-		providerConfig.ProviderConfig.ClientID,
-		providerConfig.ProviderConfig.TokenEndpoint,
-		providerConfig.ProviderConfig.DeviceAuthEndpoint,
-	)
+	hostedClient := internal.NewHostedDeviceFlow(providerConfig.ProviderConfig)
 
 	flowInfo, err := hostedClient.RequestDeviceCode(context.TODO())
 	if err != nil {

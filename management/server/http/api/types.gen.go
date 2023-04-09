@@ -13,37 +13,45 @@ const (
 
 // Defines values for EventActivityCode.
 const (
-	EventActivityCodeAccountCreate                           EventActivityCode = "account.create"
-	EventActivityCodeDnsSettingDisabledManagementGroupAdd    EventActivityCode = "dns.setting.disabled.management.group.add"
-	EventActivityCodeDnsSettingDisabledManagementGroupDelete EventActivityCode = "dns.setting.disabled.management.group.delete"
-	EventActivityCodeGroupAdd                                EventActivityCode = "group.add"
-	EventActivityCodeGroupUpdate                             EventActivityCode = "group.update"
-	EventActivityCodeNameserverGroupAdd                      EventActivityCode = "nameserver.group.add"
-	EventActivityCodeNameserverGroupDelete                   EventActivityCode = "nameserver.group.delete"
-	EventActivityCodeNameserverGroupUpdate                   EventActivityCode = "nameserver.group.update"
-	EventActivityCodePeerRename                              EventActivityCode = "peer.rename"
-	EventActivityCodePeerSshDisable                          EventActivityCode = "peer.ssh.disable"
-	EventActivityCodePeerSshEnable                           EventActivityCode = "peer.ssh.enable"
-	EventActivityCodeRouteAdd                                EventActivityCode = "route.add"
-	EventActivityCodeRouteDelete                             EventActivityCode = "route.delete"
-	EventActivityCodeRouteUpdate                             EventActivityCode = "route.update"
-	EventActivityCodeRuleAdd                                 EventActivityCode = "rule.add"
-	EventActivityCodeRuleDelete                              EventActivityCode = "rule.delete"
-	EventActivityCodeRuleUpdate                              EventActivityCode = "rule.update"
-	EventActivityCodeSetupkeyAdd                             EventActivityCode = "setupkey.add"
-	EventActivityCodeSetupkeyGroupAdd                        EventActivityCode = "setupkey.group.add"
-	EventActivityCodeSetupkeyGroupDelete                     EventActivityCode = "setupkey.group.delete"
-	EventActivityCodeSetupkeyOveruse                         EventActivityCode = "setupkey.overuse"
-	EventActivityCodeSetupkeyPeerAdd                         EventActivityCode = "setupkey.peer.add"
-	EventActivityCodeSetupkeyRevoke                          EventActivityCode = "setupkey.revoke"
-	EventActivityCodeSetupkeyUpdate                          EventActivityCode = "setupkey.update"
-	EventActivityCodeUserGroupAdd                            EventActivityCode = "user.group.add"
-	EventActivityCodeUserGroupDelete                         EventActivityCode = "user.group.delete"
-	EventActivityCodeUserInvite                              EventActivityCode = "user.invite"
-	EventActivityCodeUserJoin                                EventActivityCode = "user.join"
-	EventActivityCodeUserPeerAdd                             EventActivityCode = "user.peer.add"
-	EventActivityCodeUserPeerDelete                          EventActivityCode = "user.peer.delete"
-	EventActivityCodeUserRoleUpdate                          EventActivityCode = "user.role.update"
+	EventActivityCodeAccountCreate                            EventActivityCode = "account.create"
+	EventActivityCodeAccountSettingPeerLoginExpirationDisable EventActivityCode = "account.setting.peer.login.expiration.disable"
+	EventActivityCodeAccountSettingPeerLoginExpirationEnable  EventActivityCode = "account.setting.peer.login.expiration.enable"
+	EventActivityCodeAccountSettingPeerLoginExpirationUpdate  EventActivityCode = "account.setting.peer.login.expiration.update"
+	EventActivityCodeDnsSettingDisabledManagementGroupAdd     EventActivityCode = "dns.setting.disabled.management.group.add"
+	EventActivityCodeDnsSettingDisabledManagementGroupDelete  EventActivityCode = "dns.setting.disabled.management.group.delete"
+	EventActivityCodeGroupAdd                                 EventActivityCode = "group.add"
+	EventActivityCodeGroupUpdate                              EventActivityCode = "group.update"
+	EventActivityCodeNameserverGroupAdd                       EventActivityCode = "nameserver.group.add"
+	EventActivityCodeNameserverGroupDelete                    EventActivityCode = "nameserver.group.delete"
+	EventActivityCodeNameserverGroupUpdate                    EventActivityCode = "nameserver.group.update"
+	EventActivityCodePeerLoginExpirationDisable               EventActivityCode = "peer.login.expiration.disable"
+	EventActivityCodePeerLoginExpirationEnable                EventActivityCode = "peer.login.expiration.enable"
+	EventActivityCodePeerRename                               EventActivityCode = "peer.rename"
+	EventActivityCodePeerSshDisable                           EventActivityCode = "peer.ssh.disable"
+	EventActivityCodePeerSshEnable                            EventActivityCode = "peer.ssh.enable"
+	EventActivityCodePolicyAdd                                EventActivityCode = "policy.add"
+	EventActivityCodePolicyDelete                             EventActivityCode = "policy.delete"
+	EventActivityCodePolicyUpdate                             EventActivityCode = "policy.update"
+	EventActivityCodeRouteAdd                                 EventActivityCode = "route.add"
+	EventActivityCodeRouteDelete                              EventActivityCode = "route.delete"
+	EventActivityCodeRouteUpdate                              EventActivityCode = "route.update"
+	EventActivityCodeRuleAdd                                  EventActivityCode = "rule.add"
+	EventActivityCodeRuleDelete                               EventActivityCode = "rule.delete"
+	EventActivityCodeRuleUpdate                               EventActivityCode = "rule.update"
+	EventActivityCodeSetupkeyAdd                              EventActivityCode = "setupkey.add"
+	EventActivityCodeSetupkeyGroupAdd                         EventActivityCode = "setupkey.group.add"
+	EventActivityCodeSetupkeyGroupDelete                      EventActivityCode = "setupkey.group.delete"
+	EventActivityCodeSetupkeyOveruse                          EventActivityCode = "setupkey.overuse"
+	EventActivityCodeSetupkeyPeerAdd                          EventActivityCode = "setupkey.peer.add"
+	EventActivityCodeSetupkeyRevoke                           EventActivityCode = "setupkey.revoke"
+	EventActivityCodeSetupkeyUpdate                           EventActivityCode = "setupkey.update"
+	EventActivityCodeUserGroupAdd                             EventActivityCode = "user.group.add"
+	EventActivityCodeUserGroupDelete                          EventActivityCode = "user.group.delete"
+	EventActivityCodeUserInvite                               EventActivityCode = "user.invite"
+	EventActivityCodeUserJoin                                 EventActivityCode = "user.join"
+	EventActivityCodeUserPeerAdd                              EventActivityCode = "user.peer.add"
+	EventActivityCodeUserPeerDelete                           EventActivityCode = "user.peer.delete"
+	EventActivityCodeUserRoleUpdate                           EventActivityCode = "user.role.update"
 )
 
 // Defines values for GroupPatchOperationOp.
@@ -89,6 +97,12 @@ const (
 	PatchMinimumOpReplace PatchMinimumOp = "replace"
 )
 
+// Defines values for PolicyRuleAction.
+const (
+	PolicyRuleActionAccept PolicyRuleAction = "accept"
+	PolicyRuleActionDrop   PolicyRuleAction = "drop"
+)
+
 // Defines values for RoutePatchOperationOp.
 const (
 	RoutePatchOperationOpAdd     RoutePatchOperationOp = "add"
@@ -108,29 +122,28 @@ const (
 	RoutePatchOperationPathPeer        RoutePatchOperationPath = "peer"
 )
 
-// Defines values for RulePatchOperationOp.
-const (
-	RulePatchOperationOpAdd     RulePatchOperationOp = "add"
-	RulePatchOperationOpRemove  RulePatchOperationOp = "remove"
-	RulePatchOperationOpReplace RulePatchOperationOp = "replace"
-)
-
-// Defines values for RulePatchOperationPath.
-const (
-	RulePatchOperationPathDescription  RulePatchOperationPath = "description"
-	RulePatchOperationPathDestinations RulePatchOperationPath = "destinations"
-	RulePatchOperationPathDisabled     RulePatchOperationPath = "disabled"
-	RulePatchOperationPathFlow         RulePatchOperationPath = "flow"
-	RulePatchOperationPathName         RulePatchOperationPath = "name"
-	RulePatchOperationPathSources      RulePatchOperationPath = "sources"
-)
-
 // Defines values for UserStatus.
 const (
 	UserStatusActive   UserStatus = "active"
 	UserStatusDisabled UserStatus = "disabled"
 	UserStatusInvited  UserStatus = "invited"
 )
+
+// Account defines model for Account.
+type Account struct {
+	// Id Account ID
+	Id       string          `json:"id"`
+	Settings AccountSettings `json:"settings"`
+}
+
+// AccountSettings defines model for AccountSettings.
+type AccountSettings struct {
+	// PeerLoginExpiration Period of time after which peer login expires (seconds).
+	PeerLoginExpiration int `json:"peer_login_expiration"`
+
+	// PeerLoginExpirationEnabled Enables or disables peer login expiration globally. After peer's login has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
+	PeerLoginExpirationEnabled bool `json:"peer_login_expiration_enabled"`
+}
 
 // DNSSettings defines model for DNSSettings.
 type DNSSettings struct {
@@ -326,8 +339,17 @@ type Peer struct {
 	// Ip Peer's IP address
 	Ip string `json:"ip"`
 
+	// LastLogin Last time this peer performed log in (authentication). E.g., user authenticated.
+	LastLogin time.Time `json:"last_login"`
+
 	// LastSeen Last time peer connected to Netbird's management service
 	LastSeen time.Time `json:"last_seen"`
+
+	// LoginExpirationEnabled Indicates whether peer login expiration has been enabled or not
+	LoginExpirationEnabled bool `json:"login_expiration_enabled"`
+
+	// LoginExpired Indicates whether peer's login expired or not
+	LoginExpired bool `json:"login_expired"`
 
 	// Name Peer's hostname
 	Name string `json:"name"`
@@ -356,6 +378,110 @@ type PeerMinimum struct {
 	// Name Peer's hostname
 	Name string `json:"name"`
 }
+
+// PersonalAccessToken defines model for PersonalAccessToken.
+type PersonalAccessToken struct {
+	// CreatedAt Date the token was created
+	CreatedAt time.Time `json:"created_at"`
+
+	// CreatedBy User ID of the user who created the token
+	CreatedBy string `json:"created_by"`
+
+	// ExpirationDate Date the token expires
+	ExpirationDate time.Time `json:"expiration_date"`
+
+	// Id ID of a token
+	Id string `json:"id"`
+
+	// LastUsed Date the token was last used
+	LastUsed *time.Time `json:"last_used,omitempty"`
+
+	// Name Name of the token
+	Name string `json:"name"`
+}
+
+// PersonalAccessTokenGenerated defines model for PersonalAccessTokenGenerated.
+type PersonalAccessTokenGenerated struct {
+	PersonalAccessToken PersonalAccessToken `json:"personal_access_token"`
+
+	// PlainToken Plain text representation of the generated token
+	PlainToken string `json:"plain_token"`
+}
+
+// PersonalAccessTokenRequest defines model for PersonalAccessTokenRequest.
+type PersonalAccessTokenRequest struct {
+	// ExpiresIn Expiration in days
+	ExpiresIn int `json:"expires_in"`
+
+	// Name Name of the token
+	Name string `json:"name"`
+}
+
+// Policy defines model for Policy.
+type Policy struct {
+	// Description Policy friendly description
+	Description string `json:"description"`
+
+	// Enabled Policy status
+	Enabled bool `json:"enabled"`
+
+	// Id Policy ID
+	Id string `json:"id"`
+
+	// Name Policy name identifier
+	Name string `json:"name"`
+
+	// Query Policy Rego query
+	Query string `json:"query"`
+
+	// Rules Policy rule object for policy UI editor
+	Rules []PolicyRule `json:"rules"`
+}
+
+// PolicyMinimum defines model for PolicyMinimum.
+type PolicyMinimum struct {
+	// Description Policy friendly description
+	Description string `json:"description"`
+
+	// Enabled Policy status
+	Enabled bool `json:"enabled"`
+
+	// Name Policy name identifier
+	Name string `json:"name"`
+
+	// Query Policy Rego query
+	Query string `json:"query"`
+
+	// Rules Policy rule object for policy UI editor
+	Rules []PolicyRule `json:"rules"`
+}
+
+// PolicyRule defines model for PolicyRule.
+type PolicyRule struct {
+	// Action policy accept or drops packets
+	Action PolicyRuleAction `json:"action"`
+
+	// Description Rule friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Destinations policy destination groups
+	Destinations []GroupMinimum `json:"destinations"`
+
+	// Enabled Rules status
+	Enabled bool `json:"enabled"`
+
+	// Id Rule ID
+	Id *string `json:"id,omitempty"`
+
+	// Name Rule name identifier
+	Name string `json:"name"`
+
+	// Sources policy source groups
+	Sources []GroupMinimum `json:"sources"`
+}
+
+// PolicyRuleAction policy accept or drops packets
+type PolicyRuleAction string
 
 // Route defines model for Route.
 type Route struct {
@@ -474,24 +600,6 @@ type RuleMinimum struct {
 	Name string `json:"name"`
 }
 
-// RulePatchOperation defines model for RulePatchOperation.
-type RulePatchOperation struct {
-	// Op Patch operation type
-	Op RulePatchOperationOp `json:"op"`
-
-	// Path Rule field to update in form /<field>
-	Path RulePatchOperationPath `json:"path"`
-
-	// Value Values to be applied
-	Value []string `json:"value"`
-}
-
-// RulePatchOperationOp Patch operation type
-type RulePatchOperationOp string
-
-// RulePatchOperationPath Rule field to update in form /<field>
-type RulePatchOperationPath string
-
 // SetupKey defines model for SetupKey.
 type SetupKey struct {
 	// AutoGroups Setup key groups to auto-assign to peers registered with this key
@@ -606,6 +714,11 @@ type UserRequest struct {
 	Role string `json:"role"`
 }
 
+// PutApiAccountsIdJSONBody defines parameters for PutApiAccountsId.
+type PutApiAccountsIdJSONBody struct {
+	Settings AccountSettings `json:"settings"`
+}
+
 // PatchApiDnsNameserversIdJSONBody defines parameters for PatchApiDnsNameserversId.
 type PatchApiDnsNameserversIdJSONBody = []NameserverGroupPatchOperation
 
@@ -626,9 +739,16 @@ type PutApiGroupsIdJSONBody struct {
 
 // PutApiPeersIdJSONBody defines parameters for PutApiPeersId.
 type PutApiPeersIdJSONBody struct {
-	Name       string `json:"name"`
-	SshEnabled bool   `json:"ssh_enabled"`
+	LoginExpirationEnabled bool   `json:"login_expiration_enabled"`
+	Name                   string `json:"name"`
+	SshEnabled             bool   `json:"ssh_enabled"`
 }
+
+// PostApiPoliciesJSONBody defines parameters for PostApiPolicies.
+type PostApiPoliciesJSONBody = PolicyMinimum
+
+// PutApiPoliciesIdJSONBody defines parameters for PutApiPoliciesId.
+type PutApiPoliciesIdJSONBody = PolicyMinimum
 
 // PatchApiRoutesIdJSONBody defines parameters for PatchApiRoutesId.
 type PatchApiRoutesIdJSONBody = []RoutePatchOperation
@@ -650,9 +770,6 @@ type PostApiRulesJSONBody struct {
 	Sources *[]string `json:"sources,omitempty"`
 }
 
-// PatchApiRulesIdJSONBody defines parameters for PatchApiRulesId.
-type PatchApiRulesIdJSONBody = []RulePatchOperation
-
 // PutApiRulesIdJSONBody defines parameters for PutApiRulesId.
 type PutApiRulesIdJSONBody struct {
 	// Description Rule friendly description
@@ -669,6 +786,9 @@ type PutApiRulesIdJSONBody struct {
 	Name    string    `json:"name"`
 	Sources *[]string `json:"sources,omitempty"`
 }
+
+// PutApiAccountsIdJSONRequestBody defines body for PutApiAccountsId for application/json ContentType.
+type PutApiAccountsIdJSONRequestBody PutApiAccountsIdJSONBody
 
 // PostApiDnsNameserversJSONRequestBody defines body for PostApiDnsNameservers for application/json ContentType.
 type PostApiDnsNameserversJSONRequestBody = NameserverGroupRequest
@@ -694,6 +814,12 @@ type PutApiGroupsIdJSONRequestBody PutApiGroupsIdJSONBody
 // PutApiPeersIdJSONRequestBody defines body for PutApiPeersId for application/json ContentType.
 type PutApiPeersIdJSONRequestBody PutApiPeersIdJSONBody
 
+// PostApiPoliciesJSONRequestBody defines body for PostApiPolicies for application/json ContentType.
+type PostApiPoliciesJSONRequestBody = PostApiPoliciesJSONBody
+
+// PutApiPoliciesIdJSONRequestBody defines body for PutApiPoliciesId for application/json ContentType.
+type PutApiPoliciesIdJSONRequestBody = PutApiPoliciesIdJSONBody
+
 // PostApiRoutesJSONRequestBody defines body for PostApiRoutes for application/json ContentType.
 type PostApiRoutesJSONRequestBody = RouteRequest
 
@@ -705,9 +831,6 @@ type PutApiRoutesIdJSONRequestBody = RouteRequest
 
 // PostApiRulesJSONRequestBody defines body for PostApiRules for application/json ContentType.
 type PostApiRulesJSONRequestBody PostApiRulesJSONBody
-
-// PatchApiRulesIdJSONRequestBody defines body for PatchApiRulesId for application/json ContentType.
-type PatchApiRulesIdJSONRequestBody = PatchApiRulesIdJSONBody
 
 // PutApiRulesIdJSONRequestBody defines body for PutApiRulesId for application/json ContentType.
 type PutApiRulesIdJSONRequestBody PutApiRulesIdJSONBody
@@ -723,3 +846,6 @@ type PostApiUsersJSONRequestBody = UserCreateRequest
 
 // PutApiUsersIdJSONRequestBody defines body for PutApiUsersId for application/json ContentType.
 type PutApiUsersIdJSONRequestBody = UserRequest
+
+// PostApiUsersUserIdTokensJSONRequestBody defines body for PostApiUsersUserIdTokens for application/json ContentType.
+type PostApiUsersUserIdTokensJSONRequestBody = PersonalAccessTokenRequest

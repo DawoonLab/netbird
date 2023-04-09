@@ -2,12 +2,14 @@ package server
 
 import (
 	"fmt"
+	"strings"
+
+	log "github.com/sirupsen/logrus"
+
 	"github.com/netbirdio/netbird/management/server/activity"
 	"github.com/netbirdio/netbird/management/server/idp"
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/status"
-	log "github.com/sirupsen/logrus"
-	"strings"
 )
 
 const (
@@ -44,6 +46,7 @@ type User struct {
 	Role UserRole
 	// AutoGroups is a list of Group IDs to auto-assign to peers registered by this user
 	AutoGroups []string
+	PATs       map[string]*PersonalAccessToken
 }
 
 // IsAdmin returns true if user is an admin, false otherwise
@@ -89,12 +92,19 @@ func (u *User) toUserInfo(userData *idp.UserData) (*UserInfo, error) {
 
 // Copy the user
 func (u *User) Copy() *User {
-	autoGroups := make([]string, 0)
-	autoGroups = append(autoGroups, u.AutoGroups...)
+	autoGroups := make([]string, len(u.AutoGroups))
+	copy(autoGroups, u.AutoGroups)
+	pats := make(map[string]*PersonalAccessToken, len(u.PATs))
+	for k, v := range u.PATs {
+		patCopy := new(PersonalAccessToken)
+		*patCopy = *v
+		pats[k] = patCopy
+	}
 	return &User{
 		Id:         u.Id,
 		Role:       u.Role,
 		AutoGroups: autoGroups,
+		PATs:       pats,
 	}
 }
 
@@ -181,6 +191,150 @@ func (am *DefaultAccountManager) CreateUser(accountID, userID string, invite *Us
 
 	return newUser.toUserInfo(idpUser)
 
+}
+
+// CreatePAT creates a new PAT for the given user
+func (am *DefaultAccountManager) CreatePAT(accountID string, executingUserID string, targetUserId string, tokenName string, expiresIn int) (*PersonalAccessTokenGenerated, error) {
+	unlock := am.Store.AcquireAccountLock(accountID)
+	defer unlock()
+
+	if tokenName == "" {
+		return nil, status.Errorf(status.InvalidArgument, "token name can't be empty")
+	}
+
+	if expiresIn < 1 || expiresIn > 365 {
+		return nil, status.Errorf(status.InvalidArgument, "expiration has to be between 1 and 365")
+	}
+
+	if executingUserID != targetUserId {
+		return nil, status.Errorf(status.PermissionDenied, "no permission to create PAT for this user")
+	}
+
+	account, err := am.Store.GetAccount(accountID)
+	if err != nil {
+		return nil, err
+	}
+
+	targetUser := account.Users[targetUserId]
+	if targetUser == nil {
+		return nil, status.Errorf(status.NotFound, "targetUser not found")
+	}
+
+	pat, err := CreateNewPAT(tokenName, expiresIn, targetUser.Id)
+	if err != nil {
+		return nil, status.Errorf(status.Internal, "failed to create PAT: %v", err)
+	}
+
+	targetUser.PATs[pat.ID] = &pat.PersonalAccessToken
+
+	err = am.Store.SaveAccount(account)
+	if err != nil {
+		return nil, status.Errorf(status.Internal, "failed to save account: %v", err)
+	}
+
+	meta := map[string]any{"name": pat.Name}
+	am.storeEvent(executingUserID, targetUserId, accountID, activity.PersonalAccessTokenCreated, meta)
+
+	return pat, nil
+}
+
+// DeletePAT deletes a specific PAT from a user
+func (am *DefaultAccountManager) DeletePAT(accountID string, executingUserID string, targetUserID string, tokenID string) error {
+	unlock := am.Store.AcquireAccountLock(accountID)
+	defer unlock()
+
+	if executingUserID != targetUserID {
+		return status.Errorf(status.PermissionDenied, "no permission to delete PAT for this user")
+	}
+
+	account, err := am.Store.GetAccount(accountID)
+	if err != nil {
+		return status.Errorf(status.NotFound, "account not found: %s", err)
+	}
+
+	user := account.Users[targetUserID]
+	if user == nil {
+		return status.Errorf(status.NotFound, "user not found")
+	}
+
+	pat := user.PATs[tokenID]
+	if pat == nil {
+		return status.Errorf(status.NotFound, "PAT not found")
+	}
+
+	err = am.Store.DeleteTokenID2UserIDIndex(pat.ID)
+	if err != nil {
+		return status.Errorf(status.Internal, "Failed to delete token id index: %s", err)
+	}
+	err = am.Store.DeleteHashedPAT2TokenIDIndex(pat.HashedToken)
+	if err != nil {
+		return status.Errorf(status.Internal, "Failed to delete hashed token index: %s", err)
+	}
+
+	meta := map[string]any{"name": pat.Name}
+	am.storeEvent(executingUserID, targetUserID, accountID, activity.PersonalAccessTokenDeleted, meta)
+
+	delete(user.PATs, tokenID)
+
+	err = am.Store.SaveAccount(account)
+	if err != nil {
+		return status.Errorf(status.Internal, "Failed to save account: %s", err)
+	}
+	return nil
+}
+
+// GetPAT returns a specific PAT from a user
+func (am *DefaultAccountManager) GetPAT(accountID string, executingUserID string, targetUserID string, tokenID string) (*PersonalAccessToken, error) {
+	unlock := am.Store.AcquireAccountLock(accountID)
+	defer unlock()
+
+	if executingUserID != targetUserID {
+		return nil, status.Errorf(status.PermissionDenied, "no permission to get PAT for this user")
+	}
+
+	account, err := am.Store.GetAccount(accountID)
+	if err != nil {
+		return nil, status.Errorf(status.NotFound, "account not found: %s", err)
+	}
+
+	user := account.Users[targetUserID]
+	if user == nil {
+		return nil, status.Errorf(status.NotFound, "user not found")
+	}
+
+	pat := user.PATs[tokenID]
+	if pat == nil {
+		return nil, status.Errorf(status.NotFound, "PAT not found")
+	}
+
+	return pat, nil
+}
+
+// GetAllPATs returns all PATs for a user
+func (am *DefaultAccountManager) GetAllPATs(accountID string, executingUserID string, targetUserID string) ([]*PersonalAccessToken, error) {
+	unlock := am.Store.AcquireAccountLock(accountID)
+	defer unlock()
+
+	if executingUserID != targetUserID {
+		return nil, status.Errorf(status.PermissionDenied, "no permission to get PAT for this user")
+	}
+
+	account, err := am.Store.GetAccount(accountID)
+	if err != nil {
+		return nil, status.Errorf(status.NotFound, "account not found: %s", err)
+	}
+
+	user := account.Users[targetUserID]
+	if user == nil {
+		return nil, status.Errorf(status.NotFound, "user not found")
+	}
+
+	var pats []*PersonalAccessToken
+	for _, pat := range user.PATs {
+		pats = append(pats, pat)
+	}
+
+	return pats, nil
 }
 
 // SaveUser saves updates a given user. If the user doesn't exit it will throw status.NotFound error.
