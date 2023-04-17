@@ -173,7 +173,7 @@ func restore(file string) (*FileStore, error) {
 		for key, peer := range account.Peers {
 			// set LastLogin for the peers that were onboarded before the peer login expiration feature
 			if peer.LastLogin.IsZero() {
-				peer.LastLogin = time.Now()
+				peer.LastLogin = time.Now().UTC()
 			}
 			if peer.ID != "" {
 				continue
@@ -286,9 +286,7 @@ func (s *FileStore) SaveAccount(account *Account) error {
 		s.PrivateDomain2AccountID[accountCopy.Domain] = accountCopy.Id
 	}
 
-	if accountCopy.Rules == nil {
-		accountCopy.Rules = make(map[string]*Rule)
-	}
+	accountCopy.Rules = make(map[string]*Rule)
 	for _, policy := range accountCopy.Policies {
 		for _, rule := range policy.Rules {
 			accountCopy.Rules[rule.ID] = rule.ToRule()

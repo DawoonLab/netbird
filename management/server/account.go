@@ -283,7 +283,7 @@ func (a *Account) GetGroup(groupID string) *Group {
 
 // GetPeerNetworkMap returns a group by ID if exists, nil otherwise
 func (a *Account) GetPeerNetworkMap(peerID, dnsDomain string) *NetworkMap {
-	aclPeers, _ := a.getPeersByPolicy(peerID)
+	aclPeers := a.getPeersByACL(peerID)
 	// exclude expired peers
 	var peersToConnect []*Peer
 	var expiredPeers []*Peer
@@ -1151,7 +1151,7 @@ func (am *DefaultAccountManager) MarkPATUsed(tokenID string) error {
 		return fmt.Errorf("token not found")
 	}
 
-	pat.LastUsed = time.Now()
+	pat.LastUsed = time.Now().UTC()
 
 	return am.Store.SaveAccount(account)
 }
