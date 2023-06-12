@@ -15,6 +15,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/proto"
+	"github.com/netbirdio/netbird/client/system"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -55,6 +56,11 @@ func upFunc(cmd *cobra.Command, args []string) error {
 
 	ctx := internal.CtxInitState(cmd.Context())
 
+	if hostName != "" {
+		// nolint
+		ctx = context.WithValue(ctx, system.DeviceNameCtxKey, hostName)
+	}
+
 	if foregroundMode {
 		return runInForegroundMode(ctx, cmd)
 	}
@@ -72,14 +78,18 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command) error {
 		return err
 	}
 
-	config, err := internal.UpdateOrCreateConfig(internal.ConfigInput{
+	ic := internal.ConfigInput{
 		ManagementURL:    managementURL,
 		AdminURL:         adminURL,
 		ConfigPath:       configPath,
-		PreSharedKey:     &preSharedKey,
 		NATExternalIPs:   natExternalIPs,
 		CustomDNSAddress: customDNSAddressConverted,
-	})
+	}
+	if preSharedKey != "" {
+		ic.PreSharedKey = &preSharedKey
+	}
+
+	config, err := internal.UpdateOrCreateConfig(ic)
 	if err != nil {
 		return fmt.Errorf("get config file: %v", err)
 	}
@@ -94,7 +104,7 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command) error {
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(ctx)
 	SetupCloseHandler(ctx, cancel)
-	return internal.RunClient(ctx, config, peer.NewRecorder(config.ManagementURL.String()), nil, nil)
+	return internal.RunClient(ctx, config, peer.NewRecorder(config.ManagementURL.String()), nil, nil, nil)
 }
 
 func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
@@ -166,7 +176,7 @@ func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
 
 	if loginResp.NeedsSSOLogin {
 
-		openURL(cmd, loginResp.VerificationURIComplete)
+		openURL(cmd, loginResp.VerificationURIComplete, loginResp.UserCode)
 
 		_, err = client.WaitSSOLogin(ctx, &proto.WaitSSOLoginRequest{UserCode: loginResp.UserCode})
 		if err != nil {

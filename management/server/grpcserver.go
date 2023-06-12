@@ -52,7 +52,9 @@ func NewServer(config *Config, accountManager AccountManager, peersUpdateManager
 		jwtValidator, err = jwtclaims.NewJWTValidator(
 			config.HttpConfig.AuthIssuer,
 			config.GetAuthAudiences(),
-			config.HttpConfig.AuthKeysLocation)
+			config.HttpConfig.AuthKeysLocation,
+			config.HttpConfig.IdpSignKeyRefreshEnabled,
+		)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "unable to create new jwt middleware, err: %v", err)
 		}
@@ -112,6 +114,7 @@ func (s *GRPCServer) GetServerKey(ctx context.Context, req *proto.Empty) (*proto
 // Sync validates the existence of a connecting peer, sends an initial state (all available for the connecting peers) and
 // notifies the connected peer of any updates (e.g. new peers under the same account)
 func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementService_SyncServer) error {
+	reqStart := time.Now()
 	if s.appMetrics != nil {
 		s.appMetrics.GRPCMetrics().CountSyncRequest()
 	}
@@ -146,6 +149,11 @@ func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementServi
 	if s.config.TURNConfig.TimeBasedCredentials {
 		s.turnCredentialsManager.SetupRefresh(peer.ID)
 	}
+
+	if s.appMetrics != nil {
+		s.appMetrics.GRPCMetrics().CountSyncRequestDuration(time.Since(reqStart))
+	}
+
 	// keep a connection to the peer and send updates when available
 	for {
 		select {
@@ -260,6 +268,12 @@ func (s *GRPCServer) parseRequest(req *proto.EncryptedMessage, parsed pb.Message
 // In case it isn't, the endpoint checks whether setup key is provided within the request and tries to register a peer.
 // In case of the successful registration login is also successful
 func (s *GRPCServer) Login(ctx context.Context, req *proto.EncryptedMessage) (*proto.EncryptedMessage, error) {
+	reqStart := time.Now()
+	defer func() {
+		if s.appMetrics != nil {
+			s.appMetrics.GRPCMetrics().CountLoginRequestDuration(time.Since(reqStart))
+		}
+	}()
 	if s.appMetrics != nil {
 		s.appMetrics.GRPCMetrics().CountLoginRequest()
 	}
@@ -422,19 +436,23 @@ func toSyncResponse(config *Config, peer *Peer, turnCredentials *TURNCredentials
 
 	offlinePeers := toRemotePeerConfig(networkMap.OfflinePeers, dnsName)
 
+	firewallRules := toProtocolFirewallRules(networkMap.FirewallRules)
+
 	return &proto.SyncResponse{
 		WiretrusteeConfig:  wtConfig,
 		PeerConfig:         pConfig,
 		RemotePeers:        remotePeers,
 		RemotePeersIsEmpty: len(remotePeers) == 0,
 		NetworkMap: &proto.NetworkMap{
-			Serial:             networkMap.Network.CurrentSerial(),
-			PeerConfig:         pConfig,
-			RemotePeers:        remotePeers,
-			OfflinePeers:       offlinePeers,
-			RemotePeersIsEmpty: len(remotePeers) == 0,
-			Routes:             routesUpdate,
-			DNSConfig:          dnsUpdate,
+			Serial:               networkMap.Network.CurrentSerial(),
+			PeerConfig:           pConfig,
+			RemotePeers:          remotePeers,
+			OfflinePeers:         offlinePeers,
+			RemotePeersIsEmpty:   len(remotePeers) == 0,
+			Routes:               routesUpdate,
+			DNSConfig:            dnsUpdate,
+			FirewallRules:        firewallRules,
+			FirewallRulesIsEmpty: len(firewallRules) == 0,
 		},
 	}
 }

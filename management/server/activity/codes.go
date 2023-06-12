@@ -87,6 +87,14 @@ const (
 	PersonalAccessTokenCreated
 	// PersonalAccessTokenDeleted indicates that a user deleted a personal access token
 	PersonalAccessTokenDeleted
+	// ServiceUserCreated indicates that a user created a service user
+	ServiceUserCreated
+	// ServiceUserDeleted indicates that a user deleted a service user
+	ServiceUserDeleted
+	// UserBlocked indicates that a user blocked another user
+	UserBlocked
+	// UserUnblocked indicates that a user unblocked another user
+	UserUnblocked
 )
 
 const (
@@ -176,6 +184,14 @@ const (
 	PersonalAccessTokenCreatedMessage string = "Personal access token created"
 	// PersonalAccessTokenDeletedMessage is a human-readable text message of the PersonalAccessTokenDeleted activity
 	PersonalAccessTokenDeletedMessage string = "Personal access token deleted"
+	// ServiceUserCreatedMessage is a human-readable text message of the ServiceUserCreated activity
+	ServiceUserCreatedMessage string = "Service user created"
+	// ServiceUserDeletedMessage is a human-readable text message of the ServiceUserDeleted activity
+	ServiceUserDeletedMessage string = "Service user deleted"
+	// UserBlockedMessage is a human-readable text message of the UserBlocked activity
+	UserBlockedMessage string = "User blocked"
+	// UserUnblockedMessage is a human-readable text message of the UserUnblocked activity
+	UserUnblockedMessage string = "User unblocked"
 )
 
 // Activity that triggered an Event
@@ -270,6 +286,14 @@ func (a Activity) Message() string {
 		return PersonalAccessTokenCreatedMessage
 	case PersonalAccessTokenDeleted:
 		return PersonalAccessTokenDeletedMessage
+	case ServiceUserCreated:
+		return ServiceUserCreatedMessage
+	case ServiceUserDeleted:
+		return ServiceUserDeletedMessage
+	case UserBlocked:
+		return UserBlockedMessage
+	case UserUnblocked:
+		return UserUnblockedMessage
 	default:
 		return "UNKNOWN_ACTIVITY"
 	}
@@ -288,6 +312,10 @@ func (a Activity) StringCode() string {
 		return "user.join"
 	case UserInvited:
 		return "user.invite"
+	case UserBlocked:
+		return "user.block"
+	case UserUnblocked:
+		return "user.unblock"
 	case AccountCreated:
 		return "account.create"
 	case RuleAdded:
@@ -364,6 +392,10 @@ func (a Activity) StringCode() string {
 		return "personal.access.token.create"
 	case PersonalAccessTokenDeleted:
 		return "personal.access.token.delete"
+	case ServiceUserCreated:
+		return "service.user.create"
+	case ServiceUserDeleted:
+		return "service.user.delete"
 	default:
 		return "UNKNOWN_ACTIVITY"
 	}

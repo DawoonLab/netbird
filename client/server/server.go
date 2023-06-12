@@ -102,7 +102,7 @@ func (s *Server) Start() error {
 	}
 
 	go func() {
-		if err := internal.RunClient(ctx, config, s.statusRecorder, nil, nil); err != nil {
+		if err := internal.RunClient(ctx, config, s.statusRecorder, nil, nil, nil); err != nil {
 			log.Errorf("init connections: %v", err)
 		}
 	}()
@@ -236,7 +236,9 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 				}, nil
 			} else {
 				log.Warnf("canceling previous waiting execution")
-				s.oauthAuthFlow.waitCancel()
+				if s.oauthAuthFlow.waitCancel != nil {
+					s.oauthAuthFlow.waitCancel()
+				}
 			}
 		}
 
@@ -389,7 +391,7 @@ func (s *Server) Up(callerCtx context.Context, _ *proto.UpRequest) (*proto.UpRes
 	}
 
 	go func() {
-		if err := internal.RunClient(ctx, s.config, s.statusRecorder, nil, nil); err != nil {
+		if err := internal.RunClient(ctx, s.config, s.statusRecorder, nil, nil, nil); err != nil {
 			log.Errorf("run client connection: %v", err)
 			return
 		}

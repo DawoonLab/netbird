@@ -9,6 +9,7 @@ import (
 
 const (
 	BearerAuthScopes = "BearerAuth.Scopes"
+	TokenAuthScopes  = "TokenAuth.Scopes"
 )
 
 // Defines values for EventActivityCode.
@@ -29,6 +30,8 @@ const (
 	EventActivityCodePeerRename                               EventActivityCode = "peer.rename"
 	EventActivityCodePeerSshDisable                           EventActivityCode = "peer.ssh.disable"
 	EventActivityCodePeerSshEnable                            EventActivityCode = "peer.ssh.enable"
+	EventActivityCodePersonalAccessTokenCreate                EventActivityCode = "personal.access.token.create"
+	EventActivityCodePersonalAccessTokenDelete                EventActivityCode = "personal.access.token.delete"
 	EventActivityCodePolicyAdd                                EventActivityCode = "policy.add"
 	EventActivityCodePolicyDelete                             EventActivityCode = "policy.delete"
 	EventActivityCodePolicyUpdate                             EventActivityCode = "policy.update"
@@ -38,6 +41,8 @@ const (
 	EventActivityCodeRuleAdd                                  EventActivityCode = "rule.add"
 	EventActivityCodeRuleDelete                               EventActivityCode = "rule.delete"
 	EventActivityCodeRuleUpdate                               EventActivityCode = "rule.update"
+	EventActivityCodeServiceUserCreate                        EventActivityCode = "service.user.create"
+	EventActivityCodeServiceUserDelete                        EventActivityCode = "service.user.delete"
 	EventActivityCodeSetupkeyAdd                              EventActivityCode = "setupkey.add"
 	EventActivityCodeSetupkeyGroupAdd                         EventActivityCode = "setupkey.group.add"
 	EventActivityCodeSetupkeyGroupDelete                      EventActivityCode = "setupkey.group.delete"
@@ -45,6 +50,7 @@ const (
 	EventActivityCodeSetupkeyPeerAdd                          EventActivityCode = "setupkey.peer.add"
 	EventActivityCodeSetupkeyRevoke                           EventActivityCode = "setupkey.revoke"
 	EventActivityCodeSetupkeyUpdate                           EventActivityCode = "setupkey.update"
+	EventActivityCodeUserBlock                                EventActivityCode = "user.block"
 	EventActivityCodeUserGroupAdd                             EventActivityCode = "user.group.add"
 	EventActivityCodeUserGroupDelete                          EventActivityCode = "user.group.delete"
 	EventActivityCodeUserInvite                               EventActivityCode = "user.invite"
@@ -52,49 +58,12 @@ const (
 	EventActivityCodeUserPeerAdd                              EventActivityCode = "user.peer.add"
 	EventActivityCodeUserPeerDelete                           EventActivityCode = "user.peer.delete"
 	EventActivityCodeUserRoleUpdate                           EventActivityCode = "user.role.update"
-)
-
-// Defines values for GroupPatchOperationOp.
-const (
-	GroupPatchOperationOpAdd     GroupPatchOperationOp = "add"
-	GroupPatchOperationOpRemove  GroupPatchOperationOp = "remove"
-	GroupPatchOperationOpReplace GroupPatchOperationOp = "replace"
-)
-
-// Defines values for GroupPatchOperationPath.
-const (
-	GroupPatchOperationPathName  GroupPatchOperationPath = "name"
-	GroupPatchOperationPathPeers GroupPatchOperationPath = "peers"
+	EventActivityCodeUserUnblock                              EventActivityCode = "user.unblock"
 )
 
 // Defines values for NameserverNsType.
 const (
 	NameserverNsTypeUdp NameserverNsType = "udp"
-)
-
-// Defines values for NameserverGroupPatchOperationOp.
-const (
-	NameserverGroupPatchOperationOpAdd     NameserverGroupPatchOperationOp = "add"
-	NameserverGroupPatchOperationOpRemove  NameserverGroupPatchOperationOp = "remove"
-	NameserverGroupPatchOperationOpReplace NameserverGroupPatchOperationOp = "replace"
-)
-
-// Defines values for NameserverGroupPatchOperationPath.
-const (
-	NameserverGroupPatchOperationPathDescription NameserverGroupPatchOperationPath = "description"
-	NameserverGroupPatchOperationPathDomains     NameserverGroupPatchOperationPath = "domains"
-	NameserverGroupPatchOperationPathEnabled     NameserverGroupPatchOperationPath = "enabled"
-	NameserverGroupPatchOperationPathGroups      NameserverGroupPatchOperationPath = "groups"
-	NameserverGroupPatchOperationPathName        NameserverGroupPatchOperationPath = "name"
-	NameserverGroupPatchOperationPathNameservers NameserverGroupPatchOperationPath = "nameservers"
-	NameserverGroupPatchOperationPathPrimary     NameserverGroupPatchOperationPath = "primary"
-)
-
-// Defines values for PatchMinimumOp.
-const (
-	PatchMinimumOpAdd     PatchMinimumOp = "add"
-	PatchMinimumOpRemove  PatchMinimumOp = "remove"
-	PatchMinimumOpReplace PatchMinimumOp = "replace"
 )
 
 // Defines values for PolicyRuleAction.
@@ -103,36 +72,58 @@ const (
 	PolicyRuleActionDrop   PolicyRuleAction = "drop"
 )
 
-// Defines values for RoutePatchOperationOp.
+// Defines values for PolicyRuleProtocol.
 const (
-	RoutePatchOperationOpAdd     RoutePatchOperationOp = "add"
-	RoutePatchOperationOpRemove  RoutePatchOperationOp = "remove"
-	RoutePatchOperationOpReplace RoutePatchOperationOp = "replace"
+	PolicyRuleProtocolAll  PolicyRuleProtocol = "all"
+	PolicyRuleProtocolIcmp PolicyRuleProtocol = "icmp"
+	PolicyRuleProtocolTcp  PolicyRuleProtocol = "tcp"
+	PolicyRuleProtocolUdp  PolicyRuleProtocol = "udp"
 )
 
-// Defines values for RoutePatchOperationPath.
+// Defines values for PolicyRuleMinimumAction.
 const (
-	RoutePatchOperationPathDescription RoutePatchOperationPath = "description"
-	RoutePatchOperationPathEnabled     RoutePatchOperationPath = "enabled"
-	RoutePatchOperationPathGroups      RoutePatchOperationPath = "groups"
-	RoutePatchOperationPathMasquerade  RoutePatchOperationPath = "masquerade"
-	RoutePatchOperationPathMetric      RoutePatchOperationPath = "metric"
-	RoutePatchOperationPathNetwork     RoutePatchOperationPath = "network"
-	RoutePatchOperationPathNetworkId   RoutePatchOperationPath = "network_id"
-	RoutePatchOperationPathPeer        RoutePatchOperationPath = "peer"
+	PolicyRuleMinimumActionAccept PolicyRuleMinimumAction = "accept"
+	PolicyRuleMinimumActionDrop   PolicyRuleMinimumAction = "drop"
+)
+
+// Defines values for PolicyRuleMinimumProtocol.
+const (
+	PolicyRuleMinimumProtocolAll  PolicyRuleMinimumProtocol = "all"
+	PolicyRuleMinimumProtocolIcmp PolicyRuleMinimumProtocol = "icmp"
+	PolicyRuleMinimumProtocolTcp  PolicyRuleMinimumProtocol = "tcp"
+	PolicyRuleMinimumProtocolUdp  PolicyRuleMinimumProtocol = "udp"
+)
+
+// Defines values for PolicyRuleUpdateAction.
+const (
+	PolicyRuleUpdateActionAccept PolicyRuleUpdateAction = "accept"
+	PolicyRuleUpdateActionDrop   PolicyRuleUpdateAction = "drop"
+)
+
+// Defines values for PolicyRuleUpdateProtocol.
+const (
+	PolicyRuleUpdateProtocolAll  PolicyRuleUpdateProtocol = "all"
+	PolicyRuleUpdateProtocolIcmp PolicyRuleUpdateProtocol = "icmp"
+	PolicyRuleUpdateProtocolTcp  PolicyRuleUpdateProtocol = "tcp"
+	PolicyRuleUpdateProtocolUdp  PolicyRuleUpdateProtocol = "udp"
 )
 
 // Defines values for UserStatus.
 const (
-	UserStatusActive   UserStatus = "active"
-	UserStatusDisabled UserStatus = "disabled"
-	UserStatusInvited  UserStatus = "invited"
+	UserStatusActive  UserStatus = "active"
+	UserStatusBlocked UserStatus = "blocked"
+	UserStatusInvited UserStatus = "invited"
 )
 
 // Account defines model for Account.
 type Account struct {
 	// Id Account ID
 	Id       string          `json:"id"`
+	Settings AccountSettings `json:"settings"`
+}
+
+// AccountRequest defines model for AccountRequest.
+type AccountRequest struct {
 	Settings AccountSettings `json:"settings"`
 }
 
@@ -205,23 +196,14 @@ type GroupMinimum struct {
 	PeersCount int `json:"peers_count"`
 }
 
-// GroupPatchOperation defines model for GroupPatchOperation.
-type GroupPatchOperation struct {
-	// Op Patch operation type
-	Op GroupPatchOperationOp `json:"op"`
+// GroupRequest defines model for GroupRequest.
+type GroupRequest struct {
+	// Name Group name identifier
+	Name string `json:"name"`
 
-	// Path Group field to update in form /<field>
-	Path GroupPatchOperationPath `json:"path"`
-
-	// Value Values to be applied
-	Value []string `json:"value"`
+	// Peers List of peers ids
+	Peers *[]string `json:"peers,omitempty"`
 }
-
-// GroupPatchOperationOp Patch operation type
-type GroupPatchOperationOp string
-
-// GroupPatchOperationPath Group field to update in form /<field>
-type GroupPatchOperationPath string
 
 // Nameserver defines model for Nameserver.
 type Nameserver struct {
@@ -265,24 +247,6 @@ type NameserverGroup struct {
 	Primary bool `json:"primary"`
 }
 
-// NameserverGroupPatchOperation defines model for NameserverGroupPatchOperation.
-type NameserverGroupPatchOperation struct {
-	// Op Patch operation type
-	Op NameserverGroupPatchOperationOp `json:"op"`
-
-	// Path Nameserver group field to update in form /<field>
-	Path NameserverGroupPatchOperationPath `json:"path"`
-
-	// Value Values to be applied
-	Value []string `json:"value"`
-}
-
-// NameserverGroupPatchOperationOp Patch operation type
-type NameserverGroupPatchOperationOp string
-
-// NameserverGroupPatchOperationPath Nameserver group field to update in form /<field>
-type NameserverGroupPatchOperationPath string
-
 // NameserverGroupRequest defines model for NameserverGroupRequest.
 type NameserverGroupRequest struct {
 	// Description Nameserver group  description
@@ -306,18 +270,6 @@ type NameserverGroupRequest struct {
 	// Primary Nameserver group primary status
 	Primary bool `json:"primary"`
 }
-
-// PatchMinimum defines model for PatchMinimum.
-type PatchMinimum struct {
-	// Op Patch operation type
-	Op PatchMinimumOp `json:"op"`
-
-	// Value Values to be applied
-	Value []string `json:"value"`
-}
-
-// PatchMinimumOp Patch operation type
-type PatchMinimumOp string
 
 // Peer defines model for Peer.
 type Peer struct {
@@ -379,6 +331,13 @@ type PeerMinimum struct {
 	Name string `json:"name"`
 }
 
+// PeerRequest defines model for PeerRequest.
+type PeerRequest struct {
+	LoginExpirationEnabled bool   `json:"login_expiration_enabled"`
+	Name                   string `json:"name"`
+	SshEnabled             bool   `json:"ssh_enabled"`
+}
+
 // PersonalAccessToken defines model for PersonalAccessToken.
 type PersonalAccessToken struct {
 	// CreatedAt Date the token was created
@@ -426,7 +385,7 @@ type Policy struct {
 	Enabled bool `json:"enabled"`
 
 	// Id Policy ID
-	Id string `json:"id"`
+	Id *string `json:"id,omitempty"`
 
 	// Name Policy name identifier
 	Name string `json:"name"`
@@ -446,6 +405,138 @@ type PolicyMinimum struct {
 	// Enabled Policy status
 	Enabled bool `json:"enabled"`
 
+	// Id Policy ID
+	Id *string `json:"id,omitempty"`
+
+	// Name Policy name identifier
+	Name string `json:"name"`
+
+	// Query Policy Rego query
+	Query string `json:"query"`
+}
+
+// PolicyRule defines model for PolicyRule.
+type PolicyRule struct {
+	// Action Policy rule accept or drops packets
+	Action PolicyRuleAction `json:"action"`
+
+	// Bidirectional Define if the rule is applicable in both directions, sources, and destinations.
+	Bidirectional bool `json:"bidirectional"`
+
+	// Description Policy rule friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Destinations Policy rule destination groups
+	Destinations []GroupMinimum `json:"destinations"`
+
+	// Enabled Policy rule status
+	Enabled bool `json:"enabled"`
+
+	// Id Policy rule ID
+	Id *string `json:"id,omitempty"`
+
+	// Name Policy rule name identifier
+	Name string `json:"name"`
+
+	// Ports Policy rule affected ports or it ranges list
+	Ports *[]string `json:"ports,omitempty"`
+
+	// Protocol Policy rule type of the traffic
+	Protocol PolicyRuleProtocol `json:"protocol"`
+
+	// Sources Policy rule source groups
+	Sources []GroupMinimum `json:"sources"`
+}
+
+// PolicyRuleAction Policy rule accept or drops packets
+type PolicyRuleAction string
+
+// PolicyRuleProtocol Policy rule type of the traffic
+type PolicyRuleProtocol string
+
+// PolicyRuleMinimum defines model for PolicyRuleMinimum.
+type PolicyRuleMinimum struct {
+	// Action Policy rule accept or drops packets
+	Action PolicyRuleMinimumAction `json:"action"`
+
+	// Bidirectional Define if the rule is applicable in both directions, sources, and destinations.
+	Bidirectional bool `json:"bidirectional"`
+
+	// Description Policy rule friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Enabled Policy rule status
+	Enabled bool `json:"enabled"`
+
+	// Id Policy rule ID
+	Id *string `json:"id,omitempty"`
+
+	// Name Policy rule name identifier
+	Name string `json:"name"`
+
+	// Ports Policy rule affected ports or it ranges list
+	Ports *[]string `json:"ports,omitempty"`
+
+	// Protocol Policy rule type of the traffic
+	Protocol PolicyRuleMinimumProtocol `json:"protocol"`
+}
+
+// PolicyRuleMinimumAction Policy rule accept or drops packets
+type PolicyRuleMinimumAction string
+
+// PolicyRuleMinimumProtocol Policy rule type of the traffic
+type PolicyRuleMinimumProtocol string
+
+// PolicyRuleUpdate defines model for PolicyRuleUpdate.
+type PolicyRuleUpdate struct {
+	// Action Policy rule accept or drops packets
+	Action PolicyRuleUpdateAction `json:"action"`
+
+	// Bidirectional Define if the rule is applicable in both directions, sources, and destinations.
+	Bidirectional bool `json:"bidirectional"`
+
+	// Description Policy rule friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Destinations Policy rule destination groups
+	Destinations []string `json:"destinations"`
+
+	// Enabled Policy rule status
+	Enabled bool `json:"enabled"`
+
+	// Id Policy rule ID
+	Id *string `json:"id,omitempty"`
+
+	// Name Policy rule name identifier
+	Name string `json:"name"`
+
+	// Ports Policy rule affected ports or it ranges list
+	Ports *[]string `json:"ports,omitempty"`
+
+	// Protocol Policy rule type of the traffic
+	Protocol PolicyRuleUpdateProtocol `json:"protocol"`
+
+	// Sources Policy rule source groups
+	Sources []string `json:"sources"`
+}
+
+// PolicyRuleUpdateAction Policy rule accept or drops packets
+type PolicyRuleUpdateAction string
+
+// PolicyRuleUpdateProtocol Policy rule type of the traffic
+type PolicyRuleUpdateProtocol string
+
+// PolicyUpdate defines model for PolicyUpdate.
+type PolicyUpdate struct {
+	// Description Policy friendly description
+	Description string `json:"description"`
+
+	// Enabled Policy status
+	Enabled bool `json:"enabled"`
+
+	// Id Policy ID
+	Id *string `json:"id,omitempty"`
+
 	// Name Policy name identifier
 	Name string `json:"name"`
 
@@ -453,35 +544,8 @@ type PolicyMinimum struct {
 	Query string `json:"query"`
 
 	// Rules Policy rule object for policy UI editor
-	Rules []PolicyRule `json:"rules"`
+	Rules []PolicyRuleUpdate `json:"rules"`
 }
-
-// PolicyRule defines model for PolicyRule.
-type PolicyRule struct {
-	// Action policy accept or drops packets
-	Action PolicyRuleAction `json:"action"`
-
-	// Description Rule friendly description
-	Description *string `json:"description,omitempty"`
-
-	// Destinations policy destination groups
-	Destinations []GroupMinimum `json:"destinations"`
-
-	// Enabled Rules status
-	Enabled bool `json:"enabled"`
-
-	// Id Rule ID
-	Id *string `json:"id,omitempty"`
-
-	// Name Rule name identifier
-	Name string `json:"name"`
-
-	// Sources policy source groups
-	Sources []GroupMinimum `json:"sources"`
-}
-
-// PolicyRuleAction policy accept or drops packets
-type PolicyRuleAction string
 
 // Route defines model for Route.
 type Route struct {
@@ -515,24 +579,6 @@ type Route struct {
 	// Peer Peer Identifier associated with route
 	Peer string `json:"peer"`
 }
-
-// RoutePatchOperation defines model for RoutePatchOperation.
-type RoutePatchOperation struct {
-	// Op Patch operation type
-	Op RoutePatchOperationOp `json:"op"`
-
-	// Path Route field to update in form /<field>
-	Path RoutePatchOperationPath `json:"path"`
-
-	// Value Values to be applied
-	Value []string `json:"value"`
-}
-
-// RoutePatchOperationOp Patch operation type
-type RoutePatchOperationOp string
-
-// RoutePatchOperationPath Route field to update in form /<field>
-type RoutePatchOperationPath string
 
 // RouteRequest defines model for RouteRequest.
 type RouteRequest struct {
@@ -598,6 +644,27 @@ type RuleMinimum struct {
 
 	// Name Rule name identifier
 	Name string `json:"name"`
+}
+
+// RuleRequest defines model for RuleRequest.
+type RuleRequest struct {
+	// Description Rule friendly description
+	Description string `json:"description"`
+
+	// Destinations List of destination groups
+	Destinations *[]string `json:"destinations,omitempty"`
+
+	// Disabled Rules status
+	Disabled bool `json:"disabled"`
+
+	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
+	Flow string `json:"flow"`
+
+	// Name Rule name identifier
+	Name string `json:"name"`
+
+	// Sources List of source groups
+	Sources *[]string `json:"sources,omitempty"`
 }
 
 // SetupKey defines model for SetupKey.
@@ -674,8 +741,14 @@ type User struct {
 	// Id User ID
 	Id string `json:"id"`
 
+	// IsBlocked Is true if this user is blocked. Blocked users can't use the system
+	IsBlocked bool `json:"is_blocked"`
+
 	// IsCurrent Is true if authenticated user is the same as this user
 	IsCurrent *bool `json:"is_current,omitempty"`
+
+	// IsServiceUser Is true if this user is a service user
+	IsServiceUser *bool `json:"is_service_user,omitempty"`
 
 	// Name User's name from idp provider
 	Name string `json:"name"`
@@ -696,7 +769,10 @@ type UserCreateRequest struct {
 	AutoGroups []string `json:"auto_groups"`
 
 	// Email User's Email to send invite to
-	Email string `json:"email"`
+	Email *string `json:"email,omitempty"`
+
+	// IsServiceUser Is true if this user is a service user
+	IsServiceUser bool `json:"is_service_user"`
 
 	// Name User's full name
 	Name *string `json:"name,omitempty"`
@@ -710,142 +786,69 @@ type UserRequest struct {
 	// AutoGroups Groups to auto-assign to peers registered by this user
 	AutoGroups []string `json:"auto_groups"`
 
+	// IsBlocked If set to true then user is blocked and can't use the system
+	IsBlocked bool `json:"is_blocked"`
+
 	// Role User's NetBird account role
 	Role string `json:"role"`
 }
 
-// PutApiAccountsIdJSONBody defines parameters for PutApiAccountsId.
-type PutApiAccountsIdJSONBody struct {
-	Settings AccountSettings `json:"settings"`
+// GetApiUsersParams defines parameters for GetApiUsers.
+type GetApiUsersParams struct {
+	// ServiceUser Filters users and returns either regular users or service users
+	ServiceUser *bool `form:"service_user,omitempty" json:"service_user,omitempty"`
 }
 
-// PatchApiDnsNameserversIdJSONBody defines parameters for PatchApiDnsNameserversId.
-type PatchApiDnsNameserversIdJSONBody = []NameserverGroupPatchOperation
-
-// PostApiGroupsJSONBody defines parameters for PostApiGroups.
-type PostApiGroupsJSONBody struct {
-	Name  string    `json:"name"`
-	Peers *[]string `json:"peers,omitempty"`
-}
-
-// PatchApiGroupsIdJSONBody defines parameters for PatchApiGroupsId.
-type PatchApiGroupsIdJSONBody = []GroupPatchOperation
-
-// PutApiGroupsIdJSONBody defines parameters for PutApiGroupsId.
-type PutApiGroupsIdJSONBody struct {
-	Name  *string   `json:"Name,omitempty"`
-	Peers *[]string `json:"Peers,omitempty"`
-}
-
-// PutApiPeersIdJSONBody defines parameters for PutApiPeersId.
-type PutApiPeersIdJSONBody struct {
-	LoginExpirationEnabled bool   `json:"login_expiration_enabled"`
-	Name                   string `json:"name"`
-	SshEnabled             bool   `json:"ssh_enabled"`
-}
-
-// PostApiPoliciesJSONBody defines parameters for PostApiPolicies.
-type PostApiPoliciesJSONBody = PolicyMinimum
-
-// PutApiPoliciesIdJSONBody defines parameters for PutApiPoliciesId.
-type PutApiPoliciesIdJSONBody = PolicyMinimum
-
-// PatchApiRoutesIdJSONBody defines parameters for PatchApiRoutesId.
-type PatchApiRoutesIdJSONBody = []RoutePatchOperation
-
-// PostApiRulesJSONBody defines parameters for PostApiRules.
-type PostApiRulesJSONBody struct {
-	// Description Rule friendly description
-	Description  string    `json:"description"`
-	Destinations *[]string `json:"destinations,omitempty"`
-
-	// Disabled Rules status
-	Disabled bool `json:"disabled"`
-
-	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-	Flow string `json:"flow"`
-
-	// Name Rule name identifier
-	Name    string    `json:"name"`
-	Sources *[]string `json:"sources,omitempty"`
-}
-
-// PutApiRulesIdJSONBody defines parameters for PutApiRulesId.
-type PutApiRulesIdJSONBody struct {
-	// Description Rule friendly description
-	Description  string    `json:"description"`
-	Destinations *[]string `json:"destinations,omitempty"`
-
-	// Disabled Rules status
-	Disabled bool `json:"disabled"`
-
-	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-	Flow string `json:"flow"`
-
-	// Name Rule name identifier
-	Name    string    `json:"name"`
-	Sources *[]string `json:"sources,omitempty"`
-}
-
-// PutApiAccountsIdJSONRequestBody defines body for PutApiAccountsId for application/json ContentType.
-type PutApiAccountsIdJSONRequestBody PutApiAccountsIdJSONBody
+// PutApiAccountsAccountIdJSONRequestBody defines body for PutApiAccountsAccountId for application/json ContentType.
+type PutApiAccountsAccountIdJSONRequestBody = AccountRequest
 
 // PostApiDnsNameserversJSONRequestBody defines body for PostApiDnsNameservers for application/json ContentType.
 type PostApiDnsNameserversJSONRequestBody = NameserverGroupRequest
 
-// PatchApiDnsNameserversIdJSONRequestBody defines body for PatchApiDnsNameserversId for application/json ContentType.
-type PatchApiDnsNameserversIdJSONRequestBody = PatchApiDnsNameserversIdJSONBody
-
-// PutApiDnsNameserversIdJSONRequestBody defines body for PutApiDnsNameserversId for application/json ContentType.
-type PutApiDnsNameserversIdJSONRequestBody = NameserverGroupRequest
+// PutApiDnsNameserversNsgroupIdJSONRequestBody defines body for PutApiDnsNameserversNsgroupId for application/json ContentType.
+type PutApiDnsNameserversNsgroupIdJSONRequestBody = NameserverGroupRequest
 
 // PutApiDnsSettingsJSONRequestBody defines body for PutApiDnsSettings for application/json ContentType.
 type PutApiDnsSettingsJSONRequestBody = DNSSettings
 
 // PostApiGroupsJSONRequestBody defines body for PostApiGroups for application/json ContentType.
-type PostApiGroupsJSONRequestBody PostApiGroupsJSONBody
+type PostApiGroupsJSONRequestBody = GroupRequest
 
-// PatchApiGroupsIdJSONRequestBody defines body for PatchApiGroupsId for application/json ContentType.
-type PatchApiGroupsIdJSONRequestBody = PatchApiGroupsIdJSONBody
+// PutApiGroupsGroupIdJSONRequestBody defines body for PutApiGroupsGroupId for application/json ContentType.
+type PutApiGroupsGroupIdJSONRequestBody = GroupRequest
 
-// PutApiGroupsIdJSONRequestBody defines body for PutApiGroupsId for application/json ContentType.
-type PutApiGroupsIdJSONRequestBody PutApiGroupsIdJSONBody
-
-// PutApiPeersIdJSONRequestBody defines body for PutApiPeersId for application/json ContentType.
-type PutApiPeersIdJSONRequestBody PutApiPeersIdJSONBody
+// PutApiPeersPeerIdJSONRequestBody defines body for PutApiPeersPeerId for application/json ContentType.
+type PutApiPeersPeerIdJSONRequestBody = PeerRequest
 
 // PostApiPoliciesJSONRequestBody defines body for PostApiPolicies for application/json ContentType.
-type PostApiPoliciesJSONRequestBody = PostApiPoliciesJSONBody
+type PostApiPoliciesJSONRequestBody = PolicyUpdate
 
-// PutApiPoliciesIdJSONRequestBody defines body for PutApiPoliciesId for application/json ContentType.
-type PutApiPoliciesIdJSONRequestBody = PutApiPoliciesIdJSONBody
+// PutApiPoliciesPolicyIdJSONRequestBody defines body for PutApiPoliciesPolicyId for application/json ContentType.
+type PutApiPoliciesPolicyIdJSONRequestBody = PolicyUpdate
 
 // PostApiRoutesJSONRequestBody defines body for PostApiRoutes for application/json ContentType.
 type PostApiRoutesJSONRequestBody = RouteRequest
 
-// PatchApiRoutesIdJSONRequestBody defines body for PatchApiRoutesId for application/json ContentType.
-type PatchApiRoutesIdJSONRequestBody = PatchApiRoutesIdJSONBody
-
-// PutApiRoutesIdJSONRequestBody defines body for PutApiRoutesId for application/json ContentType.
-type PutApiRoutesIdJSONRequestBody = RouteRequest
+// PutApiRoutesRouteIdJSONRequestBody defines body for PutApiRoutesRouteId for application/json ContentType.
+type PutApiRoutesRouteIdJSONRequestBody = RouteRequest
 
 // PostApiRulesJSONRequestBody defines body for PostApiRules for application/json ContentType.
-type PostApiRulesJSONRequestBody PostApiRulesJSONBody
+type PostApiRulesJSONRequestBody = RuleRequest
 
-// PutApiRulesIdJSONRequestBody defines body for PutApiRulesId for application/json ContentType.
-type PutApiRulesIdJSONRequestBody PutApiRulesIdJSONBody
+// PutApiRulesRuleIdJSONRequestBody defines body for PutApiRulesRuleId for application/json ContentType.
+type PutApiRulesRuleIdJSONRequestBody = RuleRequest
 
 // PostApiSetupKeysJSONRequestBody defines body for PostApiSetupKeys for application/json ContentType.
 type PostApiSetupKeysJSONRequestBody = SetupKeyRequest
 
-// PutApiSetupKeysIdJSONRequestBody defines body for PutApiSetupKeysId for application/json ContentType.
-type PutApiSetupKeysIdJSONRequestBody = SetupKeyRequest
+// PutApiSetupKeysKeyIdJSONRequestBody defines body for PutApiSetupKeysKeyId for application/json ContentType.
+type PutApiSetupKeysKeyIdJSONRequestBody = SetupKeyRequest
 
 // PostApiUsersJSONRequestBody defines body for PostApiUsers for application/json ContentType.
 type PostApiUsersJSONRequestBody = UserCreateRequest
 
-// PutApiUsersIdJSONRequestBody defines body for PutApiUsersId for application/json ContentType.
-type PutApiUsersIdJSONRequestBody = UserRequest
+// PutApiUsersUserIdJSONRequestBody defines body for PutApiUsersUserId for application/json ContentType.
+type PutApiUsersUserIdJSONRequestBody = UserRequest
 
 // PostApiUsersUserIdTokensJSONRequestBody defines body for PostApiUsersUserIdTokens for application/json ContentType.
 type PostApiUsersUserIdTokensJSONRequestBody = PersonalAccessTokenRequest

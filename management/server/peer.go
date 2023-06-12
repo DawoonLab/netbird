@@ -28,6 +28,17 @@ type PeerSystemMeta struct {
 	UIVersion string
 }
 
+func (p PeerSystemMeta) isEqual(other PeerSystemMeta) bool {
+	return p.Hostname == other.Hostname &&
+		p.GoOS == other.GoOS &&
+		p.Kernel == other.Kernel &&
+		p.Core == other.Core &&
+		p.Platform == other.Platform &&
+		p.OS == other.OS &&
+		p.WtVersion == other.WtVersion &&
+		p.UIVersion == other.UIVersion
+}
+
 type PeerStatus struct {
 	// LastSeen is the last time peer was connected to the management service
 	LastSeen time.Time
@@ -114,13 +125,19 @@ func (p *Peer) Copy() *Peer {
 	}
 }
 
-// UpdateMeta updates peer's system meta data
-func (p *Peer) UpdateMeta(meta PeerSystemMeta) {
+// UpdateMetaIfNew updates peer's system metadata if new information is provided
+// returns true if meta was updated, false otherwise
+func (p *Peer) UpdateMetaIfNew(meta PeerSystemMeta) bool {
 	// Avoid overwriting UIVersion if the update was triggered sole by the CLI client
 	if meta.UIVersion == "" {
 		meta.UIVersion = p.Meta.UIVersion
 	}
+
+	if p.Meta.isEqual(meta) {
+		return false
+	}
 	p.Meta = meta
+	return true
 }
 
 // MarkLoginExpired marks peer's status expired or not
@@ -208,8 +225,7 @@ func (am *DefaultAccountManager) GetPeers(accountID, userID string) ([]*Peer, er
 
 	// fetch all the peers that have access to the user's peers
 	for _, peer := range peers {
-		// TODO: use firewall rules
-		aclPeers := account.getPeersByACL(peer.ID)
+		aclPeers, _ := account.getPeerConnectionResources(peer.ID)
 		for _, p := range aclPeers {
 			peersMap[p.ID] = p
 		}
@@ -379,9 +395,11 @@ func (am *DefaultAccountManager) DeletePeer(accountID, peerID, userID string) (*
 				RemotePeersIsEmpty: true,
 				// new field
 				NetworkMap: &proto.NetworkMap{
-					Serial:             account.Network.CurrentSerial(),
-					RemotePeers:        []*proto.RemotePeerConfig{},
-					RemotePeersIsEmpty: true,
+					Serial:               account.Network.CurrentSerial(),
+					RemotePeers:          []*proto.RemotePeerConfig{},
+					RemotePeersIsEmpty:   true,
+					FirewallRules:        []*proto.FirewallRule{},
+					FirewallRulesIsEmpty: true,
 				},
 			},
 		})
@@ -475,6 +493,16 @@ func (am *DefaultAccountManager) AddPeer(setupKey, userID string, peer *Peer) (*
 	account, err = am.Store.GetAccount(account.Id)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// This is a handling for the case when the same machine (with the same WireGuard pub key) tries to register twice.
+	// Such case is possible when AddPeer function takes long time to finish after AcquireAccountLock (e.g., database is slow)
+	// and the peer disconnects with a timeout and tries to register again.
+	// We just check if this machine has been registered before and reject the second registration.
+	// The connecting peer should be able to recover with a retry.
+	_, err = account.FindPeerByPubKey(peer.Key)
+	if err == nil {
+		return nil, nil, status.Errorf(status.PreconditionFailed, "peer has been already registered")
 	}
 
 	opEvent := &activity.Event{
@@ -605,6 +633,11 @@ func (am *DefaultAccountManager) SyncPeer(sync PeerSync) (*Peer, *NetworkMap, er
 		return nil, nil, status.Errorf(status.Unauthenticated, "peer is not registered")
 	}
 
+	err = checkIfPeerOwnerIsBlocked(peer, account)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if peerLoginExpired(peer, account) {
 		return nil, nil, status.Errorf(status.PermissionDenied, "peer login has expired, please log in once more")
 	}
@@ -644,6 +677,13 @@ func (am *DefaultAccountManager) LoginPeer(login PeerLogin) (*Peer, *NetworkMap,
 		return nil, nil, status.Errorf(status.Unauthenticated, "peer is not registered")
 	}
 
+	err = checkIfPeerOwnerIsBlocked(peer, account)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// this flag prevents unnecessary calls to the persistent store.
+	shouldStoreAccount := false
 	updateRemotePeers := false
 	if peerLoginExpired(peer, account) {
 		err = checkAuth(login.UserID, peer)
@@ -654,19 +694,26 @@ func (am *DefaultAccountManager) LoginPeer(login PeerLogin) (*Peer, *NetworkMap,
 		// UserID is present, meaning that JWT validation passed successfully in the API layer.
 		updatePeerLastLogin(peer, account)
 		updateRemotePeers = true
+		shouldStoreAccount = true
 	}
 
-	peer = updatePeerMeta(peer, login.Meta, account)
+	peer, updated := updatePeerMeta(peer, login.Meta, account)
+	if updated {
+		shouldStoreAccount = true
+	}
 
 	peer, err = am.checkAndUpdatePeerSSHKey(peer, account, login.SSHKey)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	err = am.Store.SaveAccount(account)
-	if err != nil {
-		return nil, nil, err
+	if shouldStoreAccount {
+		err = am.Store.SaveAccount(account)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
+
 	if updateRemotePeers {
 		err = am.updateAccountPeers(account)
 		if err != nil {
@@ -674,6 +721,19 @@ func (am *DefaultAccountManager) LoginPeer(login PeerLogin) (*Peer, *NetworkMap,
 		}
 	}
 	return peer, account.GetPeerNetworkMap(peer.ID, am.dnsDomain), nil
+}
+
+func checkIfPeerOwnerIsBlocked(peer *Peer, account *Account) error {
+	if peer.AddedWithSSOLogin() {
+		user, err := account.FindUser(peer.UserID)
+		if err != nil {
+			return status.Errorf(status.PermissionDenied, "user doesn't exist")
+		}
+		if user.IsBlocked() {
+			return status.Errorf(status.PermissionDenied, "user is blocked")
+		}
+	}
+	return nil
 }
 
 func checkAuth(loginUserID string, peer *Peer) error {
@@ -816,7 +876,7 @@ func (am *DefaultAccountManager) GetPeer(accountID, peerID, userID string) (*Pee
 	}
 
 	for _, p := range userPeers {
-		aclPeers := account.getPeersByACL(p.ID)
+		aclPeers, _ := account.getPeerConnectionResources(p.ID)
 		for _, aclPeer := range aclPeers {
 			if aclPeer.ID == peerID {
 				return peer, nil
@@ -827,102 +887,12 @@ func (am *DefaultAccountManager) GetPeer(accountID, peerID, userID string) (*Pee
 	return nil, status.Errorf(status.Internal, "user %s has no access to peer %s under account %s", userID, peerID, accountID)
 }
 
-func updatePeerMeta(peer *Peer, meta PeerSystemMeta, account *Account) *Peer {
-	peer.UpdateMeta(meta)
-	account.UpdatePeer(peer)
-	return peer
-}
-
-// GetPeerRules returns a list of source or destination rules of a given peer.
-func (a *Account) GetPeerRules(peerID string) (srcRules []*Rule, dstRules []*Rule) {
-	// Rules are group based so there is no direct access to peers.
-	// First, find all groups that the given peer belongs to
-	peerGroups := make(map[string]struct{})
-
-	for s, group := range a.Groups {
-		for _, peer := range group.Peers {
-			if peerID == peer {
-				peerGroups[s] = struct{}{}
-				break
-			}
-		}
+func updatePeerMeta(peer *Peer, meta PeerSystemMeta, account *Account) (*Peer, bool) {
+	if peer.UpdateMetaIfNew(meta) {
+		account.UpdatePeer(peer)
+		return peer, true
 	}
-
-	// Second, find all rules that have discovered source and destination groups
-	srcRulesMap := make(map[string]*Rule)
-	dstRulesMap := make(map[string]*Rule)
-	for _, rule := range a.Rules {
-		for _, g := range rule.Source {
-			if _, ok := peerGroups[g]; ok && srcRulesMap[rule.ID] == nil {
-				srcRules = append(srcRules, rule)
-				srcRulesMap[rule.ID] = rule
-			}
-		}
-		for _, g := range rule.Destination {
-			if _, ok := peerGroups[g]; ok && dstRulesMap[rule.ID] == nil {
-				dstRules = append(dstRules, rule)
-				dstRulesMap[rule.ID] = rule
-			}
-		}
-	}
-
-	return srcRules, dstRules
-}
-
-// getPeersByACL returns all peers that given peer has access to.
-func (a *Account) getPeersByACL(peerID string) []*Peer {
-	var peers []*Peer
-	srcRules, dstRules := a.GetPeerRules(peerID)
-
-	groups := map[string]*Group{}
-	for _, r := range srcRules {
-		if r.Disabled {
-			continue
-		}
-		if r.Flow == TrafficFlowBidirect {
-			for _, gid := range r.Destination {
-				if group, ok := a.Groups[gid]; ok {
-					groups[gid] = group
-				}
-			}
-		}
-	}
-
-	for _, r := range dstRules {
-		if r.Disabled {
-			continue
-		}
-		if r.Flow == TrafficFlowBidirect {
-			for _, gid := range r.Source {
-				if group, ok := a.Groups[gid]; ok {
-					groups[gid] = group
-				}
-			}
-		}
-	}
-
-	peersSet := make(map[string]struct{})
-	for _, g := range groups {
-		for _, pid := range g.Peers {
-			peer, ok := a.Peers[pid]
-			if !ok {
-				log.Warnf(
-					"peer %s found in group %s but doesn't belong to account %s",
-					pid,
-					g.ID,
-					a.Id,
-				)
-				continue
-			}
-			// exclude original peer
-			if _, ok := peersSet[peer.ID]; peer.ID != peerID && !ok {
-				peersSet[peer.ID] = struct{}{}
-				peers = append(peers, peer.Copy())
-			}
-		}
-	}
-
-	return peers
+	return peer, false
 }
 
 // updateAccountPeers updates all peers that belong to an account.

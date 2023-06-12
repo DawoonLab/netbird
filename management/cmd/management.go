@@ -80,6 +80,7 @@ var (
 			if err != nil {
 				return fmt.Errorf("failed reading provided config file: %s: %v", mgmtConfig, err)
 			}
+			config.HttpConfig.IdpSignKeyRefreshEnabled = idpSignKeyRefreshEnabled
 
 			tlsEnabled := false
 			if mgmtLetsencryptDomain != "" || (config.HttpConfig.CertFile != "" && config.HttpConfig.CertKey != "") {
@@ -120,13 +121,6 @@ var (
 					return fmt.Errorf("failed creating datadir: %s: %v", config.Datadir, err)
 				}
 			}
-
-			store, err := server.NewFileStore(config.Datadir)
-			if err != nil {
-				return fmt.Errorf("failed creating Store: %s: %v", config.Datadir, err)
-			}
-			peersUpdateManager := server.NewPeersUpdateManager()
-
 			appMetrics, err := telemetry.NewDefaultAppMetrics(cmd.Context())
 			if err != nil {
 				return err
@@ -135,6 +129,11 @@ var (
 			if err != nil {
 				return err
 			}
+			store, err := server.NewFileStore(config.Datadir, appMetrics)
+			if err != nil {
+				return fmt.Errorf("failed creating Store: %s: %v", config.Datadir, err)
+			}
+			peersUpdateManager := server.NewPeersUpdateManager()
 
 			var idpManager idp.Manager
 			if config.IdpManagerConfig != nil {
@@ -186,6 +185,7 @@ var (
 				config.HttpConfig.AuthIssuer,
 				config.GetAuthAudiences(),
 				config.HttpConfig.AuthKeysLocation,
+				config.HttpConfig.IdpSignKeyRefreshEnabled,
 			)
 			if err != nil {
 				return fmt.Errorf("failed creating JWT validator: %v", err)
@@ -439,7 +439,7 @@ type OIDCConfigResponse struct {
 func fetchOIDCConfig(oidcEndpoint string) (OIDCConfigResponse, error) {
 	res, err := http.Get(oidcEndpoint)
 	if err != nil {
-		return OIDCConfigResponse{}, fmt.Errorf("failed fetching OIDC configuration fro mendpoint %s %v", oidcEndpoint, err)
+		return OIDCConfigResponse{}, fmt.Errorf("failed fetching OIDC configuration from endpoint %s %v", oidcEndpoint, err)
 	}
 
 	defer func() {

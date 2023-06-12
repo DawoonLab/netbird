@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netbirdio/netbird/client/internal/stdnet"
+
 	"github.com/miekg/dns"
+
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/iface"
 )
@@ -38,21 +41,23 @@ func TestUpdateDNSServer(t *testing.T) {
 		},
 	}
 
+	dummyHandler := &localResolver{}
+
 	testCases := []struct {
 		name                string
-		initUpstreamMap     registrationMap
+		initUpstreamMap     registeredHandlerMap
 		initLocalMap        registrationMap
 		initSerial          uint64
 		inputSerial         uint64
 		inputUpdate         nbdns.Config
 		shouldFail          bool
-		expectedUpstreamMap registrationMap
+		expectedUpstreamMap registeredHandlerMap
 		expectedLocalMap    registrationMap
 	}{
 		{
 			name:            "Initial Config Should Succeed",
 			initLocalMap:    make(registrationMap),
-			initUpstreamMap: make(registrationMap),
+			initUpstreamMap: make(registeredHandlerMap),
 			initSerial:      0,
 			inputSerial:     1,
 			inputUpdate: nbdns.Config{
@@ -74,13 +79,13 @@ func TestUpdateDNSServer(t *testing.T) {
 					},
 				},
 			},
-			expectedUpstreamMap: registrationMap{"netbird.io": struct{}{}, "netbird.cloud": struct{}{}, nbdns.RootZone: struct{}{}},
+			expectedUpstreamMap: registeredHandlerMap{"netbird.io": dummyHandler, "netbird.cloud": dummyHandler, nbdns.RootZone: dummyHandler},
 			expectedLocalMap:    registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
 		},
 		{
 			name:            "New Config Should Succeed",
 			initLocalMap:    registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap: registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
+			initUpstreamMap: registeredHandlerMap{buildRecordKey(zoneRecords[0].Name, 1, 1): dummyHandler},
 			initSerial:      0,
 			inputSerial:     1,
 			inputUpdate: nbdns.Config{
@@ -98,13 +103,13 @@ func TestUpdateDNSServer(t *testing.T) {
 					},
 				},
 			},
-			expectedUpstreamMap: registrationMap{"netbird.io": struct{}{}, "netbird.cloud": struct{}{}},
+			expectedUpstreamMap: registeredHandlerMap{"netbird.io": dummyHandler, "netbird.cloud": dummyHandler},
 			expectedLocalMap:    registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
 		},
 		{
 			name:            "Smaller Config Serial Should Be Skipped",
 			initLocalMap:    make(registrationMap),
-			initUpstreamMap: make(registrationMap),
+			initUpstreamMap: make(registeredHandlerMap),
 			initSerial:      2,
 			inputSerial:     1,
 			shouldFail:      true,
@@ -112,7 +117,7 @@ func TestUpdateDNSServer(t *testing.T) {
 		{
 			name:            "Empty NS Group Domain Or Not Primary Element Should Fail",
 			initLocalMap:    make(registrationMap),
-			initUpstreamMap: make(registrationMap),
+			initUpstreamMap: make(registeredHandlerMap),
 			initSerial:      0,
 			inputSerial:     1,
 			inputUpdate: nbdns.Config{
@@ -134,7 +139,7 @@ func TestUpdateDNSServer(t *testing.T) {
 		{
 			name:            "Invalid NS Group Nameservers list Should Fail",
 			initLocalMap:    make(registrationMap),
-			initUpstreamMap: make(registrationMap),
+			initUpstreamMap: make(registeredHandlerMap),
 			initSerial:      0,
 			inputSerial:     1,
 			inputUpdate: nbdns.Config{
@@ -156,7 +161,7 @@ func TestUpdateDNSServer(t *testing.T) {
 		{
 			name:            "Invalid Custom Zone Records list Should Fail",
 			initLocalMap:    make(registrationMap),
-			initUpstreamMap: make(registrationMap),
+			initUpstreamMap: make(registeredHandlerMap),
 			initSerial:      0,
 			inputSerial:     1,
 			inputUpdate: nbdns.Config{
@@ -178,28 +183,32 @@ func TestUpdateDNSServer(t *testing.T) {
 		{
 			name:                "Empty Config Should Succeed and Clean Maps",
 			initLocalMap:        registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap:     registrationMap{zoneRecords[0].Name: struct{}{}},
+			initUpstreamMap:     registeredHandlerMap{zoneRecords[0].Name: dummyHandler},
 			initSerial:          0,
 			inputSerial:         1,
 			inputUpdate:         nbdns.Config{ServiceEnable: true},
-			expectedUpstreamMap: make(registrationMap),
+			expectedUpstreamMap: make(registeredHandlerMap),
 			expectedLocalMap:    make(registrationMap),
 		},
 		{
 			name:                "Disabled Service Should clean map",
 			initLocalMap:        registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap:     registrationMap{zoneRecords[0].Name: struct{}{}},
+			initUpstreamMap:     registeredHandlerMap{zoneRecords[0].Name: dummyHandler},
 			initSerial:          0,
 			inputSerial:         1,
 			inputUpdate:         nbdns.Config{ServiceEnable: false},
-			expectedUpstreamMap: make(registrationMap),
+			expectedUpstreamMap: make(registeredHandlerMap),
 			expectedLocalMap:    make(registrationMap),
 		},
 	}
 
 	for n, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			wgIface, err := iface.NewWGIFace(fmt.Sprintf("utun230%d", n), fmt.Sprintf("100.66.100.%d/32", n+1), iface.DefaultMTU, nil)
+			newNet, err := stdnet.NewNet(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wgIface, err := iface.NewWGIFace(fmt.Sprintf("utun230%d", n), fmt.Sprintf("100.66.100.%d/32", n+1), iface.DefaultMTU, nil, newNet)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -424,7 +433,7 @@ func getDefaultServerWithNoHostManager(t *testing.T, addrPort string) *DefaultSe
 		ctxCancel: cancel,
 		server:    dnsServer,
 		dnsMux:    mux,
-		dnsMuxMap: make(registrationMap),
+		dnsMuxMap: make(registeredHandlerMap),
 		localResolver: &localResolver{
 			registeredMap: make(registrationMap),
 		},

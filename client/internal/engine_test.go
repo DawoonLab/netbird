@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/transport/v2/stdnet"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,7 @@ import (
 	"github.com/netbirdio/netbird/client/system"
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/iface"
+	"github.com/netbirdio/netbird/iface/bind"
 	mgmt "github.com/netbirdio/netbird/management/client"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
 	"github.com/netbirdio/netbird/management/server"
@@ -72,7 +74,7 @@ func TestEngine_SSH(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, peer.NewRecorder("https://mgm"))
+	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -206,12 +208,24 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, peer.NewRecorder("https://mgm"))
-	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU, nil)
-	engine.routeManager = routemanager.NewManager(ctx, key.PublicKey().String(), engine.wgInterface, engine.statusRecorder)
+	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+	newNet, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU, nil, newNet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.routeManager = routemanager.NewManager(ctx, key.PublicKey().String(), engine.wgInterface, engine.statusRecorder, nil)
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
 	}
+	conn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.udpMux = bind.NewUniversalUDPMuxDefault(bind.UniversalUDPMuxParams{UDPConn: conn})
 
 	type testCase struct {
 		name       string
@@ -390,7 +404,7 @@ func TestEngine_Sync(t *testing.T) {
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, peer.NewRecorder("https://mgm"))
+	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -548,8 +562,12 @@ func TestEngine_UpdateNetworkMapWithRoutes(t *testing.T) {
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, peer.NewRecorder("https://mgm"))
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil)
+			}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+			newNet, err := stdnet.NewNet()
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
 			assert.NoError(t, err, "shouldn't return error")
 			input := struct {
 				inputSerial uint64
@@ -713,8 +731,12 @@ func TestEngine_UpdateNetworkMapWithDNSUpdate(t *testing.T) {
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, peer.NewRecorder("https://mgm"))
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil)
+			}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+			newNet, err := stdnet.NewNet()
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
 			assert.NoError(t, err, "shouldn't return error")
 
 			mockRouteManager := &routemanager.MockManager{
@@ -978,7 +1000,7 @@ func createEngine(ctx context.Context, cancel context.CancelFunc, setupKey strin
 		WgPort:       wgPort,
 	}
 
-	return NewEngine(ctx, cancel, signalClient, mgmtClient, conf, peer.NewRecorder("https://mgm")), nil
+	return NewEngine(ctx, cancel, signalClient, mgmtClient, conf, MobileDependency{}, peer.NewRecorder("https://mgm")), nil
 }
 
 func startSignal() (*grpc.Server, string, error) {
@@ -1017,7 +1039,7 @@ func startManagement(dataDir string) (*grpc.Server, string, error) {
 		return nil, "", err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
-	store, err := server.NewFileStore(config.Datadir)
+	store, err := server.NewFileStore(config.Datadir, nil)
 	if err != nil {
 		log.Fatalf("failed creating a store: %s: %v", config.Datadir, err)
 	}

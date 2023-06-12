@@ -371,8 +371,8 @@ var _ = Describe("Management service", func() {
 				for i := 0; i < additionalPeers; i++ {
 					key, _ := wgtypes.GenerateKey()
 					loginPeerWithValidSetupKey(serverPubKey, key, client)
-					rand.Seed(time.Now().UnixNano())
-					n := rand.Intn(200)
+					r := rand.New(rand.NewSource(time.Now().UnixNano()))
+					n := r.Intn(200)
 					time.Sleep(time.Duration(n) * time.Millisecond)
 				}
 
@@ -496,7 +496,7 @@ func startServer(config *server.Config) (*grpc.Server, net.Listener) {
 	Expect(err).NotTo(HaveOccurred())
 	s := grpc.NewServer()
 
-	store, err := server.NewFileStore(config.Datadir)
+	store, err := server.NewFileStore(config.Datadir, nil)
 	if err != nil {
 		log.Fatalf("failed creating a store: %s: %v", config.Datadir, err)
 	}

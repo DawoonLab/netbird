@@ -25,7 +25,7 @@ func TestStalePeerIndices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		return
 	}
@@ -172,7 +172,7 @@ func TestStore(t *testing.T) {
 		return
 	}
 
-	restored, err := NewFileStore(store.storeFile)
+	restored, err := NewFileStore(store.storeFile, nil)
 	if err != nil {
 		return
 	}
@@ -232,7 +232,7 @@ func TestRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		return
 	}
@@ -270,7 +270,7 @@ func TestRestorePolicies_Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		return
 	}
@@ -285,10 +285,7 @@ func TestRestorePolicies_Migration(t *testing.T) {
 	require.Equal(t, policy.Description,
 		"This is a default rule that allows connections between all the resources",
 		"failed to restore a FileStore file - missing Account Policies Description")
-	expectedPolicy := policy.Copy()
-	err = expectedPolicy.UpdateQueryFromRules()
 	require.NoError(t, err, "failed to upldate query")
-	require.Equal(t, policy.Query, expectedPolicy.Query, "failed to restore a FileStore file - missing Account Policies Query")
 	require.Len(t, policy.Rules, 1, "failed to restore a FileStore file - missing Account Policy Rules")
 	require.Equal(t, policy.Rules[0].Action, PolicyTrafficActionAccept, "failed to restore a FileStore file - missing Account Policies Action")
 	require.Equal(t, policy.Rules[0].Destinations,
@@ -307,7 +304,7 @@ func TestGetAccountByPrivateDomain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		return
 	}
@@ -336,7 +333,7 @@ func TestFileStore_GetAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +375,7 @@ func TestFileStore_GetTokenIDByHashedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +428,7 @@ func TestFileStore_GetTokenIDByHashedToken_Failure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +453,7 @@ func TestFileStore_GetUserByTokenID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +481,7 @@ func TestFileStore_GetUserByTokenID_Failure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +500,7 @@ func TestFileStore_SavePeerStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := NewFileStore(storeDir)
+	store, err := NewFileStore(storeDir, nil)
 	if err != nil {
 		return
 	}
@@ -548,7 +545,7 @@ func TestFileStore_SavePeerStatus(t *testing.T) {
 }
 
 func newStore(t *testing.T) *FileStore {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(t.TempDir(), nil)
 	if err != nil {
 		t.Errorf("failed creating a new store")
 	}

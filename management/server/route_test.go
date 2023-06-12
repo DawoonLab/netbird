@@ -4,10 +4,11 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/netbirdio/netbird/management/server/activity"
-	"github.com/netbirdio/netbird/route"
 	"github.com/rs/xid"
 	"github.com/stretchr/testify/require"
+
+	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/route"
 )
 
 const (
@@ -910,8 +911,6 @@ func TestGetNetworkMap_RouteSync(t *testing.T) {
 	newPolicy.Name = "peer1 only"
 	newPolicy.Rules[0].Sources = []string{newGroup.ID}
 	newPolicy.Rules[0].Destinations = []string{newGroup.ID}
-	err = newPolicy.UpdateQueryFromRules()
-	require.NoError(t, err)
 
 	err = am.SavePolicy(account.Id, userID, newPolicy)
 	require.NoError(t, err)
@@ -946,7 +945,7 @@ func createRouterManager(t *testing.T) (*DefaultAccountManager, error) {
 
 func createRouterStore(t *testing.T) (Store, error) {
 	dataDir := t.TempDir()
-	store, err := NewFileStore(dataDir)
+	store, err := NewFileStore(dataDir, nil)
 	if err != nil {
 		return nil, err
 	}

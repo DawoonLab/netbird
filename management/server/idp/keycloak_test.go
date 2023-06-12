@@ -46,17 +46,37 @@ func TestNewKeycloakManager(t *testing.T) {
 		assertErrFuncMessage: "should return error when field empty",
 	}
 
-	testCase5Config := defaultTestConfig
-	testCase5Config.GrantType = "authorization_code"
+	testCase3Config := defaultTestConfig
+	testCase3Config.ClientSecret = ""
 
-	testCase5 := test{
-		name:                 "Wrong GrantType",
-		inputConfig:          testCase5Config,
+	testCase3 := test{
+		name:                 "Missing ClientSecret Configuration",
+		inputConfig:          testCase3Config,
 		assertErrFunc:        require.Error,
-		assertErrFuncMessage: "should return error when wrong grant type",
+		assertErrFuncMessage: "should return error when field empty",
 	}
 
-	for _, testCase := range []test{testCase1, testCase2, testCase5} {
+	testCase4Config := defaultTestConfig
+	testCase4Config.TokenEndpoint = ""
+
+	testCase4 := test{
+		name:                 "Missing TokenEndpoint Configuration",
+		inputConfig:          testCase3Config,
+		assertErrFunc:        require.Error,
+		assertErrFuncMessage: "should return error when field empty",
+	}
+
+	testCase5Config := defaultTestConfig
+	testCase5Config.GrantType = ""
+
+	testCase5 := test{
+		name:                 "Missing GrantType Configuration",
+		inputConfig:          testCase3Config,
+		assertErrFunc:        require.Error,
+		assertErrFuncMessage: "should return error when field empty",
+	}
+
+	for _, testCase := range []test{testCase1, testCase2, testCase3, testCase4, testCase5} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := NewKeycloakManager(testCase.inputConfig, &telemetry.MockAppMetrics{})
 			testCase.assertErrFunc(t, err, testCase.assertErrFuncMessage)
