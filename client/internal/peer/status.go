@@ -135,6 +135,8 @@ func (d *Status) UpdatePeerState(receivedState State) error {
 		peerState.IP = receivedState.IP
 	}
 
+	skipNotification := shouldSkipNotify(receivedState, peerState)
+
 	if receivedState.ConnStatus != peerState.ConnStatus {
 		peerState.ConnStatus = receivedState.ConnStatus
 		peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
@@ -146,8 +148,7 @@ func (d *Status) UpdatePeerState(receivedState State) error {
 
 	d.peers[receivedState.PubKey] = peerState
 
-	if receivedState.ConnStatus == StatusConnecting ||
-		(receivedState.ConnStatus == StatusDisconnected && peerState.ConnStatus == StatusConnecting) {
+	if skipNotification {
 		return nil
 	}
 
@@ -159,6 +160,19 @@ func (d *Status) UpdatePeerState(receivedState State) error {
 
 	d.notifyPeerListChanged()
 	return nil
+}
+
+func shouldSkipNotify(new, curr State) bool {
+	switch {
+	case new.ConnStatus == StatusConnecting:
+		return true
+	case new.ConnStatus == StatusDisconnected && curr.ConnStatus == StatusConnecting:
+		return true
+	case new.ConnStatus == StatusDisconnected && curr.ConnStatus == StatusDisconnected:
+		return curr.IP != ""
+	default:
+		return false
+	}
 }
 
 // UpdatePeerFQDN update peer's state fqdn only

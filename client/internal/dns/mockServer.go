@@ -7,16 +7,17 @@ import (
 
 // MockServer is the mock instance of a dns server
 type MockServer struct {
-	StartFunc           func()
+	InitializeFunc      func() error
 	StopFunc            func()
 	UpdateDNSServerFunc func(serial uint64, update nbdns.Config) error
 }
 
-// Start mock implementation of Start from Server interface
-func (m *MockServer) Start() {
-	if m.StartFunc != nil {
-		m.StartFunc()
+// Initialize mock implementation of Initialize from Server interface
+func (m *MockServer) Initialize() error {
+	if m.InitializeFunc != nil {
+		return m.InitializeFunc()
 	}
+	return nil
 }
 
 // Stop mock implementation of Stop from Server interface
@@ -24,6 +25,10 @@ func (m *MockServer) Stop() {
 	if m.StopFunc != nil {
 		m.StopFunc()
 	}
+}
+
+func (m *MockServer) DnsIP() string {
+	return ""
 }
 
 // UpdateDNSServer mock implementation of UpdateDNSServer from Server interface

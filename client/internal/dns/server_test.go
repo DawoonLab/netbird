@@ -9,10 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/netbirdio/netbird/client/internal/stdnet"
-
 	"github.com/miekg/dns"
 
+	"github.com/netbirdio/netbird/client/internal/stdnet"
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/iface"
 )
@@ -222,7 +221,11 @@ func TestUpdateDNSServer(t *testing.T) {
 					t.Log(err)
 				}
 			}()
-			dnsServer, err := NewDefaultServer(context.Background(), wgIface, "")
+			dnsServer, err := NewDefaultServer(context.Background(), wgIface, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = dnsServer.Initialize()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -238,6 +241,7 @@ func TestUpdateDNSServer(t *testing.T) {
 			dnsServer.updateSerial = testCase.initSerial
 			// pretend we are running
 			dnsServer.listenerIsRunning = true
+			dnsServer.fakeResolverWG.Add(1)
 
 			err = dnsServer.UpdateDNSServer(testCase.inputSerial, testCase.inputUpdate)
 			if err != nil {
@@ -291,7 +295,7 @@ func TestDNSServerStartStop(t *testing.T) {
 			dnsServer := getDefaultServerWithNoHostManager(t, testCase.addrPort)
 
 			dnsServer.hostManager = newNoopHostMocker()
-			dnsServer.Start()
+			dnsServer.listen()
 			time.Sleep(100 * time.Millisecond)
 			if !dnsServer.listenerIsRunning {
 				t.Fatal("dns server listener is not running")
@@ -428,7 +432,7 @@ func getDefaultServerWithNoHostManager(t *testing.T, addrPort string) *DefaultSe
 
 	ctx, cancel := context.WithCancel(context.TODO())
 
-	return &DefaultServer{
+	ds := &DefaultServer{
 		ctx:       ctx,
 		ctxCancel: cancel,
 		server:    dnsServer,
@@ -438,5 +442,32 @@ func getDefaultServerWithNoHostManager(t *testing.T, addrPort string) *DefaultSe
 			registeredMap: make(registrationMap),
 		},
 		customAddress: parsedAddrPort,
+	}
+	ds.evalRuntimeAddress()
+	return ds
+}
+
+func TestGetLastIPFromNetwork(t *testing.T) {
+	tests := []struct {
+		addr string
+		ip   string
+	}{
+		{"2001:db8::/32", "2001:db8:ffff:ffff:ffff:ffff:ffff:fffe"},
+		{"192.168.0.0/30", "192.168.0.2"},
+		{"192.168.0.0/16", "192.168.255.254"},
+		{"192.168.0.0/24", "192.168.0.254"},
+	}
+
+	for _, tt := range tests {
+		_, ipnet, err := net.ParseCIDR(tt.addr)
+		if err != nil {
+			t.Errorf("Error parsing CIDR: %v", err)
+			return
+		}
+
+		lastIP := getLastIPFromNetwork(ipnet, 1)
+		if lastIP != tt.ip {
+			t.Errorf("wrong IP address, expected %s: got %s", tt.ip, lastIP)
+		}
 	}
 }

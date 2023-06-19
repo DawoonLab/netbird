@@ -189,14 +189,37 @@ func (e *Engine) Start() error {
 		return err
 	}
 
-	routes, err := e.readInitialRoutes()
-	if err != nil {
-		return err
+	var routes []*route.Route
+	var dnsCfg *nbdns.Config
+
+	if runtime.GOOS == "android" {
+		routes, dnsCfg, err = e.readInitialSettings()
+		if err != nil {
+			return err
+		}
 	}
+
+	if e.dnsServer == nil {
+		// todo fix custom address
+		dnsServer, err := dns.NewDefaultServer(e.ctx, e.wgInterface, e.config.CustomDNSAddress, dnsCfg)
+		if err != nil {
+			e.close()
+			return err
+		}
+		e.dnsServer = dnsServer
+	}
+
 	e.routeManager = routemanager.NewManager(e.ctx, e.config.WgPrivateKey.PublicKey().String(), e.wgInterface, e.statusRecorder, routes)
 	e.routeManager.SetRouteChangeListener(e.mobileDep.RouteListener)
 
-	err = e.wgInterface.Create()
+	if runtime.GOOS != "android" {
+		err = e.wgInterface.Create()
+	} else {
+		err = e.wgInterface.CreateOnMobile(iface.MobileIFaceArguments{
+			Routes: e.routeManager.InitialRouteRange(),
+			Dns:    e.dnsServer.DnsIP(),
+		})
+	}
 	if err != nil {
 		log.Errorf("failed creating tunnel interface %s: [%s]", wgIFaceName, err.Error())
 		e.close()
@@ -236,14 +259,10 @@ func (e *Engine) Start() error {
 		e.acl = acl
 	}
 
-	if e.dnsServer == nil {
-		// todo fix custom address
-		dnsServer, err := dns.NewDefaultServer(e.ctx, e.wgInterface, e.config.CustomDNSAddress)
-		if err != nil {
-			e.close()
-			return err
-		}
-		e.dnsServer = dnsServer
+	err = e.dnsServer.Initialize()
+	if err != nil {
+		e.close()
+		return err
 	}
 
 	e.receiveSignalEvents()
@@ -1027,17 +1046,14 @@ func (e *Engine) close() {
 	}
 }
 
-func (e *Engine) readInitialRoutes() ([]*route.Route, error) {
-	if runtime.GOOS != "android" {
-		return nil, nil
-	}
-
-	routesResp, err := e.mgmClient.GetRoutes()
+func (e *Engine) readInitialSettings() ([]*route.Route, *nbdns.Config, error) {
+	netMap, err := e.mgmClient.GetNetworkMap()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return toRoutes(routesResp), nil
-
+	routes := toRoutes(netMap.GetRoutes())
+	dnsCfg := toDNSConfig(netMap.GetDNSConfig())
+	return routes, &dnsCfg, nil
 }
 
 func findIPFromInterfaceName(ifaceName string) (net.IP, error) {
