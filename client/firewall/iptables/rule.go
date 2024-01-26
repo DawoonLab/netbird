@@ -2,13 +2,15 @@ package iptables
 
 // Rule to handle management of rules
 type Rule struct {
-	id    string
+	ruleID    string
+	ipsetName string
+
 	specs []string
-	dst   bool
-	v6    bool
+	ip    string
+	chain string
 }
 
 // GetRuleID returns the rule id
 func (r *Rule) GetRuleID() string {
-	return r.id
+	return r.ruleID
 }

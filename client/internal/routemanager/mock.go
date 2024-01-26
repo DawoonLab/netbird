@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	firewall "github.com/netbirdio/netbird/client/firewall/manager"
+	"github.com/netbirdio/netbird/client/internal/listener"
 	"github.com/netbirdio/netbird/iface"
 	"github.com/netbirdio/netbird/route"
 )
@@ -32,8 +34,12 @@ func (m *MockManager) Start(ctx context.Context, iface *iface.WGIface) {
 }
 
 // SetRouteChangeListener mock implementation of SetRouteChangeListener from Manager interface
-func (m *MockManager) SetRouteChangeListener(listener RouteListener) {
+func (m *MockManager) SetRouteChangeListener(listener listener.NetworkChangeListener) {
 
+}
+
+func (m *MockManager) EnableServerRouter(firewall firewall.Manager) error {
+	panic("implement me")
 }
 
 // Stop mock implementation of Stop from Manager interface

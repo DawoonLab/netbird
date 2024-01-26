@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
-	"regexp"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -15,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/netbirdio/netbird/iface"
+	nbversion "github.com/netbirdio/netbird/version"
 )
 
 const (
@@ -72,7 +71,7 @@ func (s networkManagerConnSettings) cleanDeprecatedSettings() {
 	}
 }
 
-func newNetworkManagerDbusConfigurator(wgInterface *iface.WGIface) (hostManager, error) {
+func newNetworkManagerDbusConfigurator(wgInterface WGIface) (hostManager, error) {
 	obj, closeConn, err := getDbusObject(networkManagerDest, networkManagerDbusObjectNode)
 	if err != nil {
 		return nil, err
@@ -95,7 +94,7 @@ func (n *networkManagerDbusConfigurator) supportCustomPort() bool {
 	return false
 }
 
-func (n *networkManagerDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
+func (n *networkManagerDbusConfigurator) applyDNSConfig(config HostDNSConfig) error {
 	connSettings, configVersion, err := n.getAppliedConnectionSettings()
 	if err != nil {
 		return fmt.Errorf("got an error while retrieving the applied connection settings, error: %s", err)
@@ -103,7 +102,7 @@ func (n *networkManagerDbusConfigurator) applyDNSConfig(config hostDNSConfig) er
 
 	connSettings.cleanDeprecatedSettings()
 
-	dnsIP, err := netip.ParseAddr(config.serverIP)
+	dnsIP, err := netip.ParseAddr(config.ServerIP)
 	if err != nil {
 		return fmt.Errorf("unable to parse ip address, error: %s", err)
 	}
@@ -113,33 +112,33 @@ func (n *networkManagerDbusConfigurator) applyDNSConfig(config hostDNSConfig) er
 		searchDomains []string
 		matchDomains  []string
 	)
-	for _, dConf := range config.domains {
-		if dConf.disabled {
+	for _, dConf := range config.Domains {
+		if dConf.Disabled {
 			continue
 		}
-		if dConf.matchOnly {
-			matchDomains = append(matchDomains, "~."+dns.Fqdn(dConf.domain))
+		if dConf.MatchOnly {
+			matchDomains = append(matchDomains, "~."+dns.Fqdn(dConf.Domain))
 			continue
 		}
-		searchDomains = append(searchDomains, dns.Fqdn(dConf.domain))
+		searchDomains = append(searchDomains, dns.Fqdn(dConf.Domain))
 	}
 
-	newDomainList := append(searchDomains, matchDomains...)
+	newDomainList := append(searchDomains, matchDomains...) //nolint:gocritic
 
 	priority := networkManagerDbusSearchDomainOnlyPriority
 	switch {
-	case config.routeAll:
+	case config.RouteAll:
 		priority = networkManagerDbusPrimaryDNSPriority
 		newDomainList = append(newDomainList, "~.")
 		if !n.routingAll {
-			log.Infof("configured %s:%d as main DNS forwarder for this peer", config.serverIP, config.serverPort)
+			log.Infof("configured %s:%d as main DNS forwarder for this peer", config.ServerIP, config.ServerPort)
 		}
 	case len(matchDomains) > 0:
 		priority = networkManagerDbusWithMatchDomainPriority
 	}
 
 	if priority != networkManagerDbusPrimaryDNSPriority && n.routingAll {
-		log.Infof("removing %s:%d as main DNS forwarder for this peer", config.serverIP, config.serverPort)
+		log.Infof("removing %s:%d as main DNS forwarder for this peer", config.ServerIP, config.ServerPort)
 		n.routingAll = false
 	}
 
@@ -291,12 +290,7 @@ func isNetworkManagerSupportedVersion() bool {
 }
 
 func parseVersion(inputVersion string) (*version.Version, error) {
-	reg, err := regexp.Compile(version.SemverRegexpRaw)
-	if err != nil {
-		return nil, err
-	}
-
-	if inputVersion == "" || !reg.MatchString(inputVersion) {
+	if inputVersion == "" || !nbversion.SemverRegexp.MatchString(inputVersion) {
 		return nil, fmt.Errorf("couldn't parse the provided version: Not SemVer")
 	}
 

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 if ! which curl >/dev/null 2>&1; then
   echo "This script uses curl fetch OpenID configuration from IDP."
@@ -35,7 +36,7 @@ fi
 
 if [[ "x-$NETBIRD_DOMAIN" == "x-" ]]; then
   echo NETBIRD_DOMAIN is not set, please update your setup.env file
-  echo If you are migrating from old versions, you migh need to update your variables prefixes from
+  echo If you are migrating from old versions, you might need to update your variables prefixes from
   echo WIRETRUSTEE_.. TO NETBIRD_
   exit 1
 fi
@@ -52,6 +53,32 @@ fi
 if [[ "x-$TURN_PASSWORD" == "x-" ]]; then
   export TURN_PASSWORD=$(openssl rand -base64 32 | sed 's/=//g')
 fi
+
+TURN_EXTERNAL_IP_CONFIG="#"
+
+if [[ "x-$NETBIRD_TURN_EXTERNAL_IP" == "x-" ]]; then
+  echo "discovering server's public IP"
+  IP=$(curl -s -4 https://jsonip.com | jq -r '.ip')
+  if [[ "x-$IP" != "x-" ]]; then
+    TURN_EXTERNAL_IP_CONFIG="external-ip=$IP"
+  else
+    echo "unable to discover server's public IP"
+  fi
+else
+  echo "${NETBIRD_TURN_EXTERNAL_IP}"| egrep '([0-9]{1,3}\.){3}[0-9]{1,3}$' > /dev/null
+  if [[ $? -eq 0 ]]; then
+    echo "using provided server's public IP"
+    TURN_EXTERNAL_IP_CONFIG="external-ip=$NETBIRD_TURN_EXTERNAL_IP"
+  else
+    echo "provided NETBIRD_TURN_EXTERNAL_IP $NETBIRD_TURN_EXTERNAL_IP is invalid, please correct it and try again"
+    exit 1
+  fi
+fi
+
+export TURN_EXTERNAL_IP_CONFIG
+
+artifacts_path="./artifacts"
+mkdir -p $artifacts_path
 
 MGMT_VOLUMENAME="${VOLUME_PREFIX}${MGMT_VOLUMESUFFIX}"
 SIGNAL_VOLUMENAME="${VOLUME_PREFIX}${SIGNAL_VOLUMESUFFIX}"
@@ -93,23 +120,21 @@ if [[ -z "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" ]]; then
 fi
 
 echo "loading OpenID configuration from ${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT} to the openid-configuration.json file"
-curl "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" -q -o openid-configuration.json
+curl "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" -q -o ${artifacts_path}/openid-configuration.json
 
-export NETBIRD_AUTH_AUTHORITY=$(jq -r '.issuer' openid-configuration.json)
-export NETBIRD_AUTH_JWT_CERTS=$(jq -r '.jwks_uri' openid-configuration.json)
-export NETBIRD_AUTH_SUPPORTED_SCOPES=$(jq -r '.scopes_supported | join(" ")' openid-configuration.json)
-export NETBIRD_AUTH_TOKEN_ENDPOINT=$(jq -r '.token_endpoint' openid-configuration.json)
-export NETBIRD_AUTH_DEVICE_AUTH_ENDPOINT=$(jq -r '.device_authorization_endpoint' openid-configuration.json)
-
-if [ "$NETBIRD_USE_AUTH0" == "true" ]; then
-  export NETBIRD_AUTH_SUPPORTED_SCOPES="openid profile email offline_access api email_verified"
-else
-  export NETBIRD_AUTH_SUPPORTED_SCOPES="openid profile email offline_access api"
-fi
+export NETBIRD_AUTH_AUTHORITY=$(jq -r '.issuer' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_JWT_CERTS=$(jq -r '.jwks_uri' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_TOKEN_ENDPOINT=$(jq -r '.token_endpoint' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_DEVICE_AUTH_ENDPOINT=$(jq -r '.device_authorization_endpoint' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_PKCE_AUTHORIZATION_ENDPOINT=$(jq -r '.authorization_endpoint' ${artifacts_path}/openid-configuration.json)
 
 if [[ ! -z "${NETBIRD_AUTH_DEVICE_AUTH_CLIENT_ID}" ]]; then
   # user enabled Device Authorization Grant feature
   export NETBIRD_AUTH_DEVICE_AUTH_PROVIDER="hosted"
+fi
+
+if [ "$NETBIRD_TOKEN_SOURCE" = "idToken" ]; then
+    export NETBIRD_AUTH_PKCE_USE_ID_TOKEN=true
 fi
 
 # Check if letsencrypt was disabled
@@ -126,7 +151,7 @@ if [[ "$NETBIRD_DISABLE_LETSENCRYPT" == "true" ]]; then
   echo "- $NETBIRD_SIGNAL_ENDPOINT/signalexchange.SignalExchange/ -grpc-> signal:80"
   echo "You most likely also have to change NETBIRD_MGMT_API_ENDPOINT in base.setup.env and port-mappings in docker-compose.yml.tmpl and rerun this script."
   echo " The target of the forwards depends on your setup. Beware of the gRPC protocol instead of http for management and signal!"
-  echo "You are also free to remove any occurences of the Letsencrypt-volume $LETSENCRYPT_VOLUMENAME"
+  echo "You are also free to remove any occurrences of the Letsencrypt-volume $LETSENCRYPT_VOLUMENAME"
   echo ""
 
   export NETBIRD_SIGNAL_PROTOCOL="https"
@@ -156,10 +181,47 @@ if [ -n "$NETBIRD_MGMT_IDP" ]; then
   export NETBIRD_IDP_MGMT_CLIENT_ID
   export NETBIRD_IDP_MGMT_CLIENT_SECRET
   export NETBIRD_IDP_MGMT_EXTRA_CONFIG=$EXTRA_CONFIG
+else
+  export NETBIRD_IDP_MGMT_EXTRA_CONFIG={}
+fi
+
+IFS=',' read -r -a REDIRECT_URL_PORTS <<< "$NETBIRD_AUTH_PKCE_REDIRECT_URL_PORTS"
+REDIRECT_URLS=""
+for port in "${REDIRECT_URL_PORTS[@]}"; do
+    REDIRECT_URLS+="\"http://localhost:${port}\","
+done
+
+export NETBIRD_AUTH_PKCE_REDIRECT_URLS=${REDIRECT_URLS%,}
+
+# Remove audience for providers that do not support it
+if [ "$NETBIRD_DASH_AUTH_USE_AUDIENCE" = "false" ]; then
+    export NETBIRD_DASH_AUTH_AUDIENCE=none
+    export NETBIRD_AUTH_PKCE_AUDIENCE=
+fi
+
+# Read the encryption key
+if test -f 'management.json'; then
+    encKey=$(jq -r  ".DataStoreEncryptionKey" management.json)
+    if [[ "$encKey" != "null" ]]; then
+        export NETBIRD_DATASTORE_ENC_KEY=$encKey
+
+    fi
 fi
 
 env | grep NETBIRD
 
-envsubst <docker-compose.yml.tmpl >docker-compose.yml
-envsubst <management.json.tmpl >management.json
-envsubst <turnserver.conf.tmpl >turnserver.conf
+bkp_postfix="$(date +%s)"
+if test -f "${artifacts_path}/docker-compose.yml"; then
+    cp $artifacts_path/docker-compose.yml "${artifacts_path}/docker-compose.yml.bkp.${bkp_postfix}"
+fi
+
+if test -f "${artifacts_path}/management.json"; then
+    cp $artifacts_path/management.json "${artifacts_path}/management.json.bkp.${bkp_postfix}"
+fi
+
+if test -f "${artifacts_path}/turnserver.conf"; then
+    cp ${artifacts_path}/turnserver.conf "${artifacts_path}/turnserver.conf.bkp.${bkp_postfix}"
+fi
+envsubst <docker-compose.yml.tmpl >$artifacts_path/docker-compose.yml
+envsubst <management.json.tmpl | jq . >$artifacts_path/management.json
+envsubst <turnserver.conf.tmpl >$artifacts_path/turnserver.conf

@@ -7,6 +7,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	firewall "github.com/netbirdio/netbird/client/firewall/manager"
+	"github.com/netbirdio/netbird/client/internal/listener"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/iface"
 	"github.com/netbirdio/netbird/route"
@@ -16,8 +18,9 @@ import (
 // Manager is a route manager interface
 type Manager interface {
 	UpdateRoutes(updateSerial uint64, newRoutes []*route.Route) error
-	SetRouteChangeListener(listener RouteListener)
+	SetRouteChangeListener(listener listener.NetworkChangeListener)
 	InitialRouteRange() []string
+	EnableServerRouter(firewall firewall.Manager) error
 	Stop()
 }
 
@@ -27,22 +30,19 @@ type DefaultManager struct {
 	stop           context.CancelFunc
 	mux            sync.Mutex
 	clientNetworks map[string]*clientNetwork
-	serverRouter   *serverRouter
+	serverRouter   serverRouter
 	statusRecorder *peer.Status
 	wgInterface    *iface.WGIface
 	pubKey         string
 	notifier       *notifier
 }
 
-// NewManager returns a new route manager
 func NewManager(ctx context.Context, pubKey string, wgInterface *iface.WGIface, statusRecorder *peer.Status, initialRoutes []*route.Route) *DefaultManager {
 	mCTX, cancel := context.WithCancel(ctx)
-
 	dm := &DefaultManager{
 		ctx:            mCTX,
 		stop:           cancel,
 		clientNetworks: make(map[string]*clientNetwork),
-		serverRouter:   newServerRouter(ctx, wgInterface),
 		statusRecorder: statusRecorder,
 		wgInterface:    wgInterface,
 		pubKey:         pubKey,
@@ -56,10 +56,21 @@ func NewManager(ctx context.Context, pubKey string, wgInterface *iface.WGIface, 
 	return dm
 }
 
+func (m *DefaultManager) EnableServerRouter(firewall firewall.Manager) error {
+	var err error
+	m.serverRouter, err = newServerRouter(m.ctx, m.wgInterface, firewall)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // Stop stops the manager watchers and clean firewall rules
 func (m *DefaultManager) Stop() {
 	m.stop()
-	m.serverRouter.cleanUp()
+	if m.serverRouter != nil {
+		m.serverRouter.cleanUp()
+	}
 	m.ctx = nil
 }
 
@@ -77,9 +88,12 @@ func (m *DefaultManager) UpdateRoutes(updateSerial uint64, newRoutes []*route.Ro
 
 		m.updateClientNetworks(updateSerial, newClientRoutesIDMap)
 		m.notifier.onNewRoutes(newClientRoutesIDMap)
-		err := m.serverRouter.updateRoutes(newServerRoutesMap)
-		if err != nil {
-			return err
+
+		if m.serverRouter != nil {
+			err := m.serverRouter.updateRoutes(newServerRoutesMap)
+			if err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -87,7 +101,7 @@ func (m *DefaultManager) UpdateRoutes(updateSerial uint64, newRoutes []*route.Ro
 }
 
 // SetRouteChangeListener set RouteListener for route change notifier
-func (m *DefaultManager) SetRouteChangeListener(listener RouteListener) {
+func (m *DefaultManager) SetRouteChangeListener(listener listener.NetworkChangeListener) {
 	m.notifier.setListener(listener)
 }
 
@@ -145,8 +159,8 @@ func (m *DefaultManager) classifiesRoutes(newRoutes []*route.Route) (map[string]
 		if !ownNetworkIDs[networkID] {
 			// if prefix is too small, lets assume is a possible default route which is not yet supported
 			// we skip this route management
-			if newRoute.Network.Bits() < 7 {
-				log.Errorf("this agent version: %s, doesn't support default routes, received %s, skiping this route",
+			if newRoute.Network.Bits() < minRangeBits {
+				log.Errorf("this agent version: %s, doesn't support default routes, received %s, skipping this route",
 					version.NetbirdVersion(), newRoute.Network)
 				continue
 			}

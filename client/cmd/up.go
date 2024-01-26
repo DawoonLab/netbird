@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/client/system"
+	"github.com/netbirdio/netbird/iface"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -36,6 +38,8 @@ var (
 
 func init() {
 	upCmd.PersistentFlags().BoolVarP(&foregroundMode, "foreground-mode", "F", false, "start service in foreground")
+	upCmd.PersistentFlags().StringVar(&interfaceName, interfaceNameFlag, iface.WgInterfaceDefault, "Wireguard interface name")
+	upCmd.PersistentFlags().Uint16Var(&wireguardPort, wireguardPortFlag, iface.DefaultWgPort, "Wireguard interface listening port")
 }
 
 func upFunc(cmd *cobra.Command, args []string) error {
@@ -85,7 +89,24 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command) error {
 		NATExternalIPs:   natExternalIPs,
 		CustomDNSAddress: customDNSAddressConverted,
 	}
-	if preSharedKey != "" {
+
+	if cmd.Flag(enableRosenpassFlag).Changed {
+		ic.RosenpassEnabled = &rosenpassEnabled
+	}
+
+	if cmd.Flag(interfaceNameFlag).Changed {
+		if err := parseInterfaceName(interfaceName); err != nil {
+			return err
+		}
+		ic.InterfaceName = &interfaceName
+	}
+
+	if cmd.Flag(wireguardPortFlag).Changed {
+		p := int(wireguardPort)
+		ic.WireguardPort = &p
+	}
+
+	if rootCmd.PersistentFlags().Changed(preSharedKeyFlag) {
 		ic.PreSharedKey = &preSharedKey
 	}
 
@@ -94,7 +115,7 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command) error {
 		return fmt.Errorf("get config file: %v", err)
 	}
 
-	config, _ = internal.UpdateOldManagementPort(ctx, config, configPath)
+	config, _ = internal.UpdateOldManagementURL(ctx, config, configPath)
 
 	err = foregroundLogin(ctx, cmd, config, setupKey)
 	if err != nil {
@@ -104,7 +125,7 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command) error {
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(ctx)
 	SetupCloseHandler(ctx, cancel)
-	return internal.RunClient(ctx, config, peer.NewRecorder(config.ManagementURL.String()), nil, nil, nil)
+	return internal.RunClient(ctx, config, peer.NewRecorder(config.ManagementURL.String()))
 }
 
 func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
@@ -123,7 +144,7 @@ func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
 	defer func() {
 		err := conn.Close()
 		if err != nil {
-			log.Warnf("failed closing dameon gRPC client connection %v", err)
+			log.Warnf("failed closing daemon gRPC client connection %v", err)
 			return
 		}
 	}()
@@ -141,13 +162,34 @@ func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
 	}
 
 	loginRequest := proto.LoginRequest{
-		SetupKey:            setupKey,
-		PreSharedKey:        preSharedKey,
-		ManagementUrl:       managementURL,
-		AdminURL:            adminURL,
-		NatExternalIPs:      natExternalIPs,
-		CleanNATExternalIPs: natExternalIPs != nil && len(natExternalIPs) == 0,
-		CustomDNSAddress:    customDNSAddressConverted,
+		SetupKey:             setupKey,
+		ManagementUrl:        managementURL,
+		AdminURL:             adminURL,
+		NatExternalIPs:       natExternalIPs,
+		CleanNATExternalIPs:  natExternalIPs != nil && len(natExternalIPs) == 0,
+		CustomDNSAddress:     customDNSAddressConverted,
+		IsLinuxDesktopClient: isLinuxRunningDesktop(),
+		Hostname:             hostName,
+	}
+
+	if rootCmd.PersistentFlags().Changed(preSharedKeyFlag) {
+		loginRequest.OptionalPreSharedKey = &preSharedKey
+	}
+
+	if cmd.Flag(enableRosenpassFlag).Changed {
+		loginRequest.RosenpassEnabled = &rosenpassEnabled
+	}
+
+	if cmd.Flag(interfaceNameFlag).Changed {
+		if err := parseInterfaceName(interfaceName); err != nil {
+			return err
+		}
+		loginRequest.InterfaceName = &interfaceName
+	}
+
+	if cmd.Flag(wireguardPortFlag).Changed {
+		wp := int64(wireguardPort)
+		loginRequest.WireguardPort = &wp
 	}
 
 	var loginErr error
@@ -178,7 +220,7 @@ func runInDaemonMode(ctx context.Context, cmd *cobra.Command) error {
 
 		openURL(cmd, loginResp.VerificationURIComplete, loginResp.UserCode)
 
-		_, err = client.WaitSSOLogin(ctx, &proto.WaitSSOLoginRequest{UserCode: loginResp.UserCode})
+		_, err = client.WaitSSOLogin(ctx, &proto.WaitSSOLoginRequest{UserCode: loginResp.UserCode, Hostname: hostName})
 		if err != nil {
 			return fmt.Errorf("waiting sso login failed with: %v", err)
 		}
@@ -199,11 +241,11 @@ func validateNATExternalIPs(list []string) error {
 
 		subElements := strings.Split(element, "/")
 		if len(subElements) > 2 {
-			return fmt.Errorf("%s is not a valid input for %s. it should be formated as \"String\" or \"String/String\"", element, externalIPMapFlag)
+			return fmt.Errorf("%s is not a valid input for %s. it should be formatted as \"String\" or \"String/String\"", element, externalIPMapFlag)
 		}
 
 		if len(subElements) == 1 && !isValidIP(subElements[0]) {
-			return fmt.Errorf("%s is not a valid input for %s. it should be formated as \"IP\" or \"IP/IP\", or \"IP/Interface Name\"", element, externalIPMapFlag)
+			return fmt.Errorf("%s is not a valid input for %s. it should be formatted as \"IP\" or \"IP/IP\", or \"IP/Interface Name\"", element, externalIPMapFlag)
 		}
 
 		last := 0
@@ -219,6 +261,18 @@ func validateNATExternalIPs(list []string) error {
 		}
 	}
 	return nil
+}
+
+func parseInterfaceName(name string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+
+	if strings.HasPrefix(name, "utun") {
+		return nil
+	}
+
+	return fmt.Errorf("invalid interface name %s. Please use the prefix utun followed by a number on MacOS. e.g., utun1 or utun199", name)
 }
 
 func validateElement(element string) (int, error) {
@@ -258,7 +312,7 @@ func parseCustomDNSAddress(modified bool) ([]byte, error) {
 	var parsed []byte
 	if modified {
 		if !isValidAddrPort(customDNSAddress) {
-			return nil, fmt.Errorf("%s is invalid, it should be formated as IP:Port string or as an empty string like \"\"", customDNSAddress)
+			return nil, fmt.Errorf("%s is invalid, it should be formatted as IP:Port string or as an empty string like \"\"", customDNSAddress)
 		}
 		if customDNSAddress == "" && logFile != "console" {
 			parsed = []byte("empty")

@@ -10,6 +10,7 @@ import (
 	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	"github.com/netbirdio/netbird/management/server/status"
 	"github.com/netbirdio/netbird/management/server/telemetry"
 
@@ -52,6 +53,25 @@ func NewFileStore(dataDir string, metrics telemetry.AppMetrics) (*FileStore, err
 	}
 	fs.metrics = metrics
 	return fs, nil
+}
+
+// NewFilestoreFromSqliteStore restores a store from Sqlite and stores to Filestore json in the file located in datadir
+func NewFilestoreFromSqliteStore(sqlitestore *SqliteStore, dataDir string, metrics telemetry.AppMetrics) (*FileStore, error) {
+	store, err := NewFileStore(dataDir, metrics)
+	if err != nil {
+		return nil, err
+	}
+
+	err = store.SaveInstallationID(sqlitestore.GetInstallationID())
+	if err != nil {
+		return nil, err
+	}
+
+	for _, account := range sqlitestore.GetAllAccounts() {
+		store.Accounts[account.Id] = account
+	}
+
+	return store, store.persist(store.storeFile)
 }
 
 // restore the state of the store from the file.
@@ -111,13 +131,14 @@ func restore(file string) (*FileStore, error) {
 		for _, peer := range account.Peers {
 			store.PeerKeyID2AccountID[peer.Key] = accountID
 			store.PeerID2AccountID[peer.ID] = accountID
-			// reset all peers to status = Disconnected
-			if peer.Status != nil && peer.Status.Connected {
-				peer.Status.Connected = false
-			}
 		}
 		for _, user := range account.Users {
 			store.UserID2AccountID[user.Id] = accountID
+			if user.Issued == "" {
+				user.Issued = UserIssuedAPI
+				account.Users[user.Id] = user
+			}
+
 			for _, pat := range user.PATs {
 				store.TokenID2UserID[pat.ID] = user.Id
 				store.HashedPAT2TokenID[pat.HashedToken] = pat.ID
@@ -157,6 +178,14 @@ func restore(file string) (*FileStore, error) {
 			addPeerLabelsToAccount(account, existingLabels)
 		}
 
+		// TODO: delete this block after migration
+		// Set API as issuer for groups which has not this field
+		for _, group := range account.Groups {
+			if group.Issued == "" {
+				group.Issued = GroupIssuedAPI
+			}
+		}
+
 		allGroup, err := account.GetGroupAll()
 		if err != nil {
 			log.Errorf("unable to find the All group, this should happen only when migrate from a version that didn't support groups. Error: %v", err)
@@ -176,7 +205,7 @@ func restore(file string) (*FileStore, error) {
 		// Set the Peer.ID to the newly generated value.
 		// Replace all the mentions of Peer.Key as ID (groups and routes).
 		// Swap Peer.Key with Peer.ID in the Account.Peers map.
-		migrationPeers := make(map[string]*Peer) // key to Peer
+		migrationPeers := make(map[string]*nbpeer.Peer) // key to Peer
 		for key, peer := range account.Peers {
 			// set LastLogin for the peers that were onboarded before the peer login expiration feature
 			if peer.LastLogin.IsZero() {
@@ -281,6 +310,10 @@ func (s *FileStore) SaveAccount(account *Account) error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
+	if account.Id == "" {
+		return status.Errorf(status.InvalidArgument, "account id should not be empty")
+	}
+
 	accountCopy := account.Copy()
 
 	s.Accounts[accountCopy.Id] = accountCopy
@@ -319,6 +352,41 @@ func (s *FileStore) SaveAccount(account *Account) error {
 	return s.persist(s.storeFile)
 }
 
+func (s *FileStore) DeleteAccount(account *Account) error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	if account.Id == "" {
+		return status.Errorf(status.InvalidArgument, "account id should not be empty")
+	}
+
+	for keyID := range account.SetupKeys {
+		delete(s.SetupKeyID2AccountID, strings.ToUpper(keyID))
+	}
+
+	// enforce peer to account index and delete peer to route indexes for rebuild
+	for _, peer := range account.Peers {
+		delete(s.PeerKeyID2AccountID, peer.Key)
+		delete(s.PeerID2AccountID, peer.ID)
+	}
+
+	for _, user := range account.Users {
+		for _, pat := range user.PATs {
+			delete(s.TokenID2UserID, pat.ID)
+			delete(s.HashedPAT2TokenID, pat.HashedToken)
+		}
+		delete(s.UserID2AccountID, user.Id)
+	}
+
+	if account.DomainCategory == PrivateCategory && account.IsDomainPrimaryAccount {
+		delete(s.PrivateDomain2AccountID, account.Domain)
+	}
+
+	delete(s.Accounts, account.Id)
+
+	return s.persist(s.storeFile)
+}
+
 // DeleteHashedPAT2TokenIDIndex removes an entry from the indexing map HashedPAT2TokenID
 func (s *FileStore) DeleteHashedPAT2TokenIDIndex(hashedToken string) error {
 	s.mux.Lock()
@@ -326,7 +394,7 @@ func (s *FileStore) DeleteHashedPAT2TokenIDIndex(hashedToken string) error {
 
 	delete(s.HashedPAT2TokenID, hashedToken)
 
-	return s.persist(s.storeFile)
+	return nil
 }
 
 // DeleteTokenID2UserIDIndex removes an entry from the indexing map TokenID2UserID
@@ -336,7 +404,7 @@ func (s *FileStore) DeleteTokenID2UserIDIndex(tokenID string) error {
 
 	delete(s.TokenID2UserID, tokenID)
 
-	return s.persist(s.storeFile)
+	return nil
 }
 
 // GetAccountByPrivateDomain returns account by private domain
@@ -539,7 +607,7 @@ func (s *FileStore) SaveInstallationID(ID string) error {
 
 // SavePeerStatus stores the PeerStatus in memory. It doesn't attempt to persist data to speed up things.
 // PeerStatus will be saved eventually when some other changes occur.
-func (s *FileStore) SavePeerStatus(accountID, peerID string, peerStatus PeerStatus) error {
+func (s *FileStore) SavePeerStatus(accountID, peerID string, peerStatus nbpeer.PeerStatus) error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
@@ -558,6 +626,26 @@ func (s *FileStore) SavePeerStatus(accountID, peerID string, peerStatus PeerStat
 	return nil
 }
 
+// SaveUserLastLogin stores the last login time for a user in memory. It doesn't attempt to persist data to speed up things.
+func (s *FileStore) SaveUserLastLogin(accountID, userID string, lastLogin time.Time) error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	account, err := s.getAccount(accountID)
+	if err != nil {
+		return err
+	}
+
+	peer := account.Users[userID]
+	if peer == nil {
+		return status.Errorf(status.NotFound, "user %s not found", userID)
+	}
+
+	peer.LastLogin = lastLogin
+
+	return nil
+}
+
 // Close the FileStore persisting data to disk
 func (s *FileStore) Close() error {
 	s.mux.Lock()
@@ -566,4 +654,9 @@ func (s *FileStore) Close() error {
 	log.Infof("closing FileStore")
 
 	return s.persist(s.storeFile)
+}
+
+// GetStoreEngine returns FileStoreEngine
+func (s *FileStore) GetStoreEngine() StoreEngine {
+	return FileStoreEngine
 }

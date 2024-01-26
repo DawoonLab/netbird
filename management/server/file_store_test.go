@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -35,7 +36,7 @@ func TestStalePeerIndices(t *testing.T) {
 
 	peerID := "some_peer"
 	peerKey := "some_peer_key"
-	account.Peers[peerID] = &Peer{
+	account.Peers[peerID] = &nbpeer.Peer{
 		ID:  peerID,
 		Key: peerKey,
 	}
@@ -89,13 +90,13 @@ func TestSaveAccount(t *testing.T) {
 	account := newAccountWithId("account_id", "testuser", "")
 	setupKey := GenerateDefaultSetupKey()
 	account.SetupKeys[setupKey.Key] = setupKey
-	account.Peers["testpeer"] = &Peer{
+	account.Peers["testpeer"] = &nbpeer.Peer{
 		Key:      "peerkey",
 		SetupKey: "peerkeysetupkey",
 		IP:       net.IP{127, 0, 0, 1},
-		Meta:     PeerSystemMeta{},
+		Meta:     nbpeer.PeerSystemMeta{},
 		Name:     "peer name",
-		Status:   &PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+		Status:   &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
 	}
 
 	// SaveAccount should trigger persist
@@ -121,17 +122,71 @@ func TestSaveAccount(t *testing.T) {
 	}
 }
 
+func TestDeleteAccount(t *testing.T) {
+	storeDir := t.TempDir()
+	storeFile := filepath.Join(storeDir, "store.json")
+	err := util.CopyFileContents("testdata/store.json", storeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewFileStore(storeDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var account *Account
+	for _, a := range store.Accounts {
+		account = a
+		break
+	}
+
+	require.NotNil(t, account, "failed to restore a FileStore file and get at least one account")
+
+	err = store.DeleteAccount(account)
+	require.NoError(t, err, "failed to delete account, error: %v", err)
+
+	_, ok := store.Accounts[account.Id]
+	require.False(t, ok, "failed to delete account")
+
+	for id := range account.Users {
+		_, ok := store.UserID2AccountID[id]
+		assert.False(t, ok, "failed to delete UserID2AccountID index")
+		for _, pat := range account.Users[id].PATs {
+			_, ok := store.HashedPAT2TokenID[pat.HashedToken]
+			assert.False(t, ok, "failed to delete HashedPAT2TokenID index")
+			_, ok = store.TokenID2UserID[pat.ID]
+			assert.False(t, ok, "failed to delete TokenID2UserID index")
+		}
+	}
+
+	for _, p := range account.Peers {
+		_, ok := store.PeerKeyID2AccountID[p.Key]
+		assert.False(t, ok, "failed to delete PeerKeyID2AccountID index")
+		_, ok = store.PeerID2AccountID[p.ID]
+		assert.False(t, ok, "failed to delete PeerID2AccountID index")
+	}
+
+	for id := range account.SetupKeys {
+		_, ok := store.SetupKeyID2AccountID[id]
+		assert.False(t, ok, "failed to delete SetupKeyID2AccountID index")
+	}
+
+	_, ok = store.PrivateDomain2AccountID[account.Domain]
+	assert.False(t, ok, "failed to delete PrivateDomain2AccountID index")
+
+}
+
 func TestStore(t *testing.T) {
 	store := newStore(t)
 
 	account := newAccountWithId("account_id", "testuser", "")
-	account.Peers["testpeer"] = &Peer{
+	account.Peers["testpeer"] = &nbpeer.Peer{
 		Key:      "peerkey",
 		SetupKey: "peerkeysetupkey",
 		IP:       net.IP{127, 0, 0, 1},
-		Meta:     PeerSystemMeta{},
+		Meta:     nbpeer.PeerSystemMeta{},
 		Name:     "peer name",
-		Status:   &PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
+		Status:   &nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()},
 	}
 	account.Groups["all"] = &Group{
 		ID:    "all",
@@ -262,6 +317,7 @@ func TestRestore(t *testing.T) {
 	require.Len(t, store.TokenID2UserID, 1, "failed to restore a FileStore wrong TokenID2UserID mapping length")
 }
 
+// TODO: outdated, delete this
 func TestRestorePolicies_Migration(t *testing.T) {
 	storeDir := t.TempDir()
 
@@ -294,6 +350,40 @@ func TestRestorePolicies_Migration(t *testing.T) {
 	require.Equal(t, policy.Rules[0].Sources,
 		[]string{"cfefqs706sqkneg59g3g"},
 		"failed to restore a FileStore file - missing Account Policies Sources")
+}
+
+func TestRestoreGroups_Migration(t *testing.T) {
+	storeDir := t.TempDir()
+
+	err := util.CopyFileContents("testdata/store.json", filepath.Join(storeDir, "store.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewFileStore(storeDir, nil)
+	if err != nil {
+		return
+	}
+
+	// create default group
+	account := store.Accounts["bf1c8084-ba50-4ce7-9439-34653001fc3b"]
+	account.Groups = map[string]*Group{
+		"cfefqs706sqkneg59g3g": {
+			ID:   "cfefqs706sqkneg59g3g",
+			Name: "All",
+		},
+	}
+	err = store.SaveAccount(account)
+	require.NoError(t, err, "failed to save account")
+
+	// restore account with default group with empty Issue field
+	if store, err = NewFileStore(storeDir, nil); err != nil {
+		return
+	}
+	account = store.Accounts["bf1c8084-ba50-4ce7-9439-34653001fc3b"]
+
+	require.Contains(t, account.Groups, "cfefqs706sqkneg59g3g", "failed to restore a FileStore file - missing Account Groups")
+	require.Equal(t, GroupIssuedAPI, account.Groups["cfefqs706sqkneg59g3g"].Issued, "default group should has API issued mark")
 }
 
 func TestGetAccountByPrivateDomain(t *testing.T) {
@@ -352,7 +442,7 @@ func TestFileStore_GetAccount(t *testing.T) {
 	assert.Equal(t, expected.DomainCategory, account.DomainCategory)
 	assert.Equal(t, expected.Domain, account.Domain)
 	assert.Equal(t, expected.CreatedBy, account.CreatedBy)
-	assert.Equal(t, expected.Network.Id, account.Network.Id)
+	assert.Equal(t, expected.Network.Identifier, account.Network.Identifier)
 	assert.Len(t, account.Peers, len(expected.Peers))
 	assert.Len(t, account.Users, len(expected.Users))
 	assert.Len(t, account.SetupKeys, len(expected.SetupKeys))
@@ -511,19 +601,19 @@ func TestFileStore_SavePeerStatus(t *testing.T) {
 	}
 
 	// save status of non-existing peer
-	newStatus := PeerStatus{Connected: true, LastSeen: time.Now().UTC()}
+	newStatus := nbpeer.PeerStatus{Connected: true, LastSeen: time.Now().UTC()}
 	err = store.SavePeerStatus(account.Id, "non-existing-peer", newStatus)
 	assert.Error(t, err)
 
 	// save new status of existing peer
-	account.Peers["testpeer"] = &Peer{
+	account.Peers["testpeer"] = &nbpeer.Peer{
 		Key:      "peerkey",
 		ID:       "testpeer",
 		SetupKey: "peerkeysetupkey",
 		IP:       net.IP{127, 0, 0, 1},
-		Meta:     PeerSystemMeta{},
+		Meta:     nbpeer.PeerSystemMeta{},
 		Name:     "peer name",
-		Status:   &PeerStatus{Connected: false, LastSeen: time.Now().UTC()},
+		Status:   &nbpeer.PeerStatus{Connected: false, LastSeen: time.Now().UTC()},
 	}
 
 	err = store.SaveAccount(account)
@@ -545,6 +635,7 @@ func TestFileStore_SavePeerStatus(t *testing.T) {
 }
 
 func newStore(t *testing.T) *FileStore {
+	t.Helper()
 	store, err := NewFileStore(t.TempDir(), nil)
 	if err != nil {
 		t.Errorf("failed creating a new store")

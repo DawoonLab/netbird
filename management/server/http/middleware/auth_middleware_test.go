@@ -10,17 +10,19 @@ import (
 	"github.com/golang-jwt/jwt"
 
 	"github.com/netbirdio/netbird/management/server"
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
 )
 
 const (
-	audience   = "audience"
-	accountID  = "accountID"
-	domain     = "domain"
-	userID     = "userID"
-	tokenID    = "tokenID"
-	PAT        = "PAT"
-	JWT        = "JWT"
-	wrongToken = "wrongToken"
+	audience    = "audience"
+	userIDClaim = "userIDClaim"
+	accountID   = "accountID"
+	domain      = "domain"
+	userID      = "userID"
+	tokenID     = "tokenID"
+	PAT         = "nbp_PAT"
+	JWT         = "JWT"
+	wrongToken  = "wrongToken"
 )
 
 var testAccount = &server.Account{
@@ -53,7 +55,13 @@ func mockGetAccountFromPAT(token string) (*server.Account, *server.User, *server
 
 func mockValidateAndParseToken(token string) (*jwt.Token, error) {
 	if token == JWT {
-		return &jwt.Token{}, nil
+		return &jwt.Token{
+			Claims: jwt.MapClaims{
+				userIDClaim:                          userID,
+				audience + jwtclaims.AccountIDSuffix: accountID,
+			},
+			Valid: true,
+		}, nil
 	}
 	return nil, fmt.Errorf("JWT invalid")
 }
@@ -63,6 +71,18 @@ func mockMarkPATUsed(token string) error {
 		return nil
 	}
 	return fmt.Errorf("Should never get reached")
+}
+
+func mockCheckUserAccessByJWTGroups(claims jwtclaims.AuthorizationClaims) error {
+	if testAccount.Id != claims.AccountId {
+		return fmt.Errorf("account with id %s does not exist", claims.AccountId)
+	}
+
+	if _, ok := testAccount.Users[claims.UserId]; !ok {
+		return fmt.Errorf("user with id %s does not exist", claims.UserId)
+	}
+
+	return nil
 }
 
 func TestAuthMiddleware_Handler(t *testing.T) {
@@ -80,6 +100,11 @@ func TestAuthMiddleware_Handler(t *testing.T) {
 			name:               "Invalid PAT Token",
 			authHeader:         "Token " + wrongToken,
 			expectedStatusCode: 401,
+		},
+		{
+			name:               "Fallback to PAT Token",
+			authHeader:         "Bearer " + PAT,
+			expectedStatusCode: 200,
 		},
 		{
 			name:               "Valid JWT Token",
@@ -102,7 +127,20 @@ func TestAuthMiddleware_Handler(t *testing.T) {
 		// do nothing
 	})
 
-	authMiddleware := NewAuthMiddleware(mockGetAccountFromPAT, mockValidateAndParseToken, mockMarkPATUsed, audience)
+	claimsExtractor := jwtclaims.NewClaimsExtractor(
+		jwtclaims.WithAudience(audience),
+		jwtclaims.WithUserIDClaim(userIDClaim),
+	)
+
+	authMiddleware := NewAuthMiddleware(
+		mockGetAccountFromPAT,
+		mockValidateAndParseToken,
+		mockMarkPATUsed,
+		mockCheckUserAccessByJWTGroups,
+		claimsExtractor,
+		audience,
+		userIDClaim,
+	)
 
 	handlerToTest := authMiddleware.Handler(nextHandler)
 
@@ -114,8 +152,10 @@ func TestAuthMiddleware_Handler(t *testing.T) {
 
 			handlerToTest.ServeHTTP(rec, req)
 
-			if rec.Result().StatusCode != tc.expectedStatusCode {
-				t.Errorf("expected status code %d, got %d", tc.expectedStatusCode, rec.Result().StatusCode)
+			result := rec.Result()
+			defer result.Body.Close()
+			if result.StatusCode != tc.expectedStatusCode {
+				t.Errorf("expected status code %d, got %d", tc.expectedStatusCode, result.StatusCode)
 			}
 		})
 	}

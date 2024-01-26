@@ -2,7 +2,7 @@ version: "3"
 services:
   #UI dashboard
   dashboard:
-    image: wiretrustee/dashboard:latest
+    image: wiretrustee/dashboard:$NETBIRD_DASHBOARD_TAG
     restart: unless-stopped
     ports:
       - 8080:80
@@ -14,7 +14,7 @@ services:
       - NETBIRD_MGMT_API_ENDPOINT=$NETBIRD_MGMT_API_ENDPOINT
       - NETBIRD_MGMT_GRPC_API_ENDPOINT=$NETBIRD_MGMT_API_ENDPOINT
       # OIDC
-      - AUTH_AUDIENCE=$NETBIRD_AUTH_AUDIENCE
+      - AUTH_AUDIENCE=$NETBIRD_DASH_AUTH_AUDIENCE
       - AUTH_CLIENT_ID=$NETBIRD_AUTH_CLIENT_ID
       - AUTH_CLIENT_SECRET=$NETBIRD_AUTH_CLIENT_SECRET
       - AUTH_AUTHORITY=$NETBIRD_AUTH_AUTHORITY
@@ -32,19 +32,19 @@ services:
       - ../../volumes/letsencrypt:/etc/letsencrypt/
   # Signal
   signal:
-    image: netbirdio/signal:latest
+    image: netbirdio/signal:$NETBIRD_SIGNAL_TAG
     restart: unless-stopped
     volumes:
       - ../../volumes/signal:/var/lib/netbird
     ports:
-      - 10000:80
+      - $NETBIRD_SIGNAL_PORT:80
   #      # port and command for Let's Encrypt validation
   #      - 443:443
   #    command: ["--letsencrypt-domain", "$NETBIRD_LETSENCRYPT_DOMAIN", "--log-file", "console"]
 
   # Management
   management:
-    image: netbirdio/management:latest
+    image: netbirdio/management:$NETBIRD_MANAGEMENT_TAG
     restart: unless-stopped
     depends_on:
       - dashboard
@@ -66,9 +66,9 @@ services:
 
   # Coturn
   coturn:
-    image: coturn/coturn
+    image: coturn/coturn:$COTURN_TAG
     restart: unless-stopped
-    domainname: $NETBIRD_DOMAIN
+    domainname: $TURN_DOMAIN
     volumes:
       - ./turnserver.conf:/etc/turnserver.conf:ro
     #      - ./privkey.pem:/etc/coturn/private/privkey.pem:ro

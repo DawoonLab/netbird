@@ -1,3 +1,5 @@
+//go:build !ios
+
 package dns
 
 import (
@@ -9,8 +11,6 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
-
-	"github.com/netbirdio/netbird/iface"
 )
 
 const (
@@ -34,7 +34,7 @@ type systemConfigurator struct {
 	createdKeys      map[string]struct{}
 }
 
-func newHostManager(_ *iface.WGIface) (hostManager, error) {
+func newHostManager(_ WGIface) (hostManager, error) {
 	return &systemConfigurator{
 		createdKeys: make(map[string]struct{}),
 	}, nil
@@ -44,11 +44,11 @@ func (s *systemConfigurator) supportCustomPort() bool {
 	return true
 }
 
-func (s *systemConfigurator) applyDNSConfig(config hostDNSConfig) error {
+func (s *systemConfigurator) applyDNSConfig(config HostDNSConfig) error {
 	var err error
 
-	if config.routeAll {
-		err = s.addDNSSetupForAll(config.serverIP, config.serverPort)
+	if config.RouteAll {
+		err = s.addDNSSetupForAll(config.ServerIP, config.ServerPort)
 		if err != nil {
 			return err
 		}
@@ -58,7 +58,7 @@ func (s *systemConfigurator) applyDNSConfig(config hostDNSConfig) error {
 			return err
 		}
 		s.primaryServiceID = ""
-		log.Infof("removed %s:%d as main DNS resolver for this peer", config.serverIP, config.serverPort)
+		log.Infof("removed %s:%d as main DNS resolver for this peer", config.ServerIP, config.ServerPort)
 	}
 
 	var (
@@ -66,20 +66,20 @@ func (s *systemConfigurator) applyDNSConfig(config hostDNSConfig) error {
 		matchDomains  []string
 	)
 
-	for _, dConf := range config.domains {
-		if dConf.disabled {
+	for _, dConf := range config.Domains {
+		if dConf.Disabled {
 			continue
 		}
-		if dConf.matchOnly {
-			matchDomains = append(matchDomains, dConf.domain)
+		if dConf.MatchOnly {
+			matchDomains = append(matchDomains, dConf.Domain)
 			continue
 		}
-		searchDomains = append(searchDomains, dConf.domain)
+		searchDomains = append(searchDomains, dConf.Domain)
 	}
 
 	matchKey := getKeyWithInput(netbirdDNSStateKeyFormat, matchSuffix)
 	if len(matchDomains) != 0 {
-		err = s.addMatchDomains(matchKey, strings.Join(matchDomains, " "), config.serverIP, config.serverPort)
+		err = s.addMatchDomains(matchKey, strings.Join(matchDomains, " "), config.ServerIP, config.ServerPort)
 	} else {
 		log.Infof("removing match domains from the system")
 		err = s.removeKeyFromSystemConfig(matchKey)
@@ -90,7 +90,7 @@ func (s *systemConfigurator) applyDNSConfig(config hostDNSConfig) error {
 
 	searchKey := getKeyWithInput(netbirdDNSStateKeyFormat, searchSuffix)
 	if len(searchDomains) != 0 {
-		err = s.addSearchDomains(searchKey, strings.Join(searchDomains, " "), config.serverIP, config.serverPort)
+		err = s.addSearchDomains(searchKey, strings.Join(searchDomains, " "), config.ServerIP, config.ServerPort)
 	} else {
 		log.Infof("removing search domains from the system")
 		err = s.removeKeyFromSystemConfig(searchKey)
@@ -184,12 +184,11 @@ func (s *systemConfigurator) addDNSState(state, domains, dnsServer string, port 
 }
 
 func (s *systemConfigurator) addDNSSetupForAll(dnsServer string, port int) error {
-	primaryServiceKey := s.getPrimaryService()
+	primaryServiceKey, existingNameserver := s.getPrimaryService()
 	if primaryServiceKey == "" {
 		return fmt.Errorf("couldn't find the primary service key")
 	}
-
-	err := s.addDNSSetup(getKeyWithInput(primaryServiceSetupKeyFormat, primaryServiceKey), dnsServer, port)
+	err := s.addDNSSetup(getKeyWithInput(primaryServiceSetupKeyFormat, primaryServiceKey), dnsServer, port, existingNameserver)
 	if err != nil {
 		return err
 	}
@@ -198,27 +197,32 @@ func (s *systemConfigurator) addDNSSetupForAll(dnsServer string, port int) error
 	return nil
 }
 
-func (s *systemConfigurator) getPrimaryService() string {
+func (s *systemConfigurator) getPrimaryService() (string, string) {
 	line := buildCommandLine("show", globalIPv4State, "")
 	stdinCommands := wrapCommand(line)
 	b, err := runSystemConfigCommand(stdinCommands)
 	if err != nil {
 		log.Error("got error while sending the command: ", err)
-		return ""
+		return "", ""
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(b))
+	primaryService := ""
+	router := ""
 	for scanner.Scan() {
 		text := scanner.Text()
 		if strings.Contains(text, "PrimaryService") {
-			return strings.TrimSpace(strings.Split(text, ":")[1])
+			primaryService = strings.TrimSpace(strings.Split(text, ":")[1])
+		}
+		if strings.Contains(text, "Router") {
+			router = strings.TrimSpace(strings.Split(text, ":")[1])
 		}
 	}
-	return ""
+	return primaryService, router
 }
 
-func (s *systemConfigurator) addDNSSetup(setupKey, dnsServer string, port int) error {
+func (s *systemConfigurator) addDNSSetup(setupKey, dnsServer string, port int, existingDNSServer string) error {
 	lines := buildAddCommandLine(keySupplementalMatchDomainsNoSearch, digitSymbol+strconv.Itoa(0))
-	lines += buildAddCommandLine(keyServerAddresses, arraySymbol+dnsServer)
+	lines += buildAddCommandLine(keyServerAddresses, arraySymbol+dnsServer+" "+existingDNSServer)
 	lines += buildAddCommandLine(keyServerPort, digitSymbol+strconv.Itoa(port))
 	addDomainCommand := buildCreateStateWithOperation(setupKey, lines)
 	stdinCommands := wrapCommand(addDomainCommand)

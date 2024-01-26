@@ -98,6 +98,11 @@ type userExportJobStatusResponse struct {
 	ID           string    `json:"id"`
 }
 
+// userVerificationJobRequest is a user verification request struct
+type userVerificationJobRequest struct {
+	UserID string `json:"user_id"`
+}
+
 // auth0Profile represents an Auth0 user profile response
 type auth0Profile struct {
 	AccountID     string `json:"wt_account_id"`
@@ -332,7 +337,7 @@ func (am *Auth0Manager) GetAccount(accountID string) ([]*UserData, error) {
 			return nil, err
 		}
 
-		log.Debugf("returned user batch for accountID %s on page %d, %v", accountID, page, batch)
+		log.Debugf("returned user batch for accountID %s on page %d, batch length %d", accountID, page, len(batch))
 
 		err = res.Body.Close()
 		if err != nil {
@@ -456,7 +461,7 @@ func (am *Auth0Manager) UpdateUserAppMetadata(userID string, appMetadata AppMeta
 	return nil
 }
 
-func buildCreateUserRequestPayload(email string, name string, accountID string) (string, error) {
+func buildCreateUserRequestPayload(email, name, accountID, invitedByEmail string) (string, error) {
 	invite := true
 	req := &createUserRequest{
 		Email: email,
@@ -464,6 +469,7 @@ func buildCreateUserRequestPayload(email string, name string, accountID string) 
 		AppMeta: AppMetadata{
 			WTAccountID:     accountID,
 			WTPendingInvite: &invite,
+			WTInvitedBy:     invitedByEmail,
 		},
 		Connection:  "Username-Password-Authentication",
 		Password:    GeneratePassword(8, 1, 1, 1),
@@ -507,7 +513,9 @@ func buildUserExportRequest() (string, error) {
 	return string(str), nil
 }
 
-func (am *Auth0Manager) createPostRequest(endpoint string, payloadStr string) (*http.Request, error) {
+func (am *Auth0Manager) createRequest(
+	method string, endpoint string, body io.Reader,
+) (*http.Request, error) {
 	jwtToken, err := am.credentials.Authenticate()
 	if err != nil {
 		return nil, err
@@ -515,17 +523,23 @@ func (am *Auth0Manager) createPostRequest(endpoint string, payloadStr string) (*
 
 	reqURL := am.authIssuer + endpoint
 
-	payload := strings.NewReader(payloadStr)
-
-	req, err := http.NewRequest("POST", reqURL, payload)
+	req, err := http.NewRequest(method, reqURL, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Add("authorization", "Bearer "+jwtToken.AccessToken)
+
+	return req, nil
+}
+
+func (am *Auth0Manager) createPostRequest(endpoint string, payloadStr string) (*http.Request, error) {
+	req, err := am.createRequest("POST", endpoint, strings.NewReader(payloadStr))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Add("content-type", "application/json")
 
 	return req, nil
-
 }
 
 // GetAllAccounts gets all registered accounts with corresponding user data.
@@ -629,9 +643,9 @@ func (am *Auth0Manager) GetUserByEmail(email string) ([]*UserData, error) {
 }
 
 // CreateUser creates a new user in Auth0 Idp and sends an invite
-func (am *Auth0Manager) CreateUser(email string, name string, accountID string) (*UserData, error) {
+func (am *Auth0Manager) CreateUser(email, name, accountID, invitedByEmail string) (*UserData, error) {
 
-	payloadString, err := buildCreateUserRequestPayload(email, name, accountID)
+	payloadString, err := buildCreateUserRequestPayload(email, name, accountID, invitedByEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -687,6 +701,80 @@ func (am *Auth0Manager) CreateUser(email string, name string, accountID string) 
 	log.Debugf("created user %s in account %s", createResp.ID, accountID)
 
 	return &createResp, nil
+}
+
+// InviteUserByID resend invitations to users who haven't activated,
+// their accounts prior to the expiration period.
+func (am *Auth0Manager) InviteUserByID(userID string) error {
+	userVerificationReq := userVerificationJobRequest{
+		UserID: userID,
+	}
+
+	payload, err := am.helper.Marshal(userVerificationReq)
+	if err != nil {
+		return err
+	}
+
+	req, err := am.createPostRequest("/api/v2/jobs/verification-email", string(payload))
+	if err != nil {
+		return err
+	}
+
+	resp, err := am.httpClient.Do(req)
+	if err != nil {
+		log.Debugf("Couldn't get job response %v", err)
+		if am.appMetrics != nil {
+			am.appMetrics.IDPMetrics().CountRequestError()
+		}
+		return err
+	}
+
+	defer func() {
+		err = resp.Body.Close()
+		if err != nil {
+			log.Errorf("error while closing invite user response body: %v", err)
+		}
+	}()
+	if !(resp.StatusCode == 200 || resp.StatusCode == 201) {
+		if am.appMetrics != nil {
+			am.appMetrics.IDPMetrics().CountRequestStatusError()
+		}
+		return fmt.Errorf("unable to invite user, statusCode %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// DeleteUser from Auth0
+func (am *Auth0Manager) DeleteUser(userID string) error {
+	req, err := am.createRequest(http.MethodDelete, "/api/v2/users/"+url.QueryEscape(userID), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := am.httpClient.Do(req)
+	if err != nil {
+		log.Debugf("execute delete request: %v", err)
+		if am.appMetrics != nil {
+			am.appMetrics.IDPMetrics().CountRequestError()
+		}
+		return err
+	}
+
+	defer func() {
+		err = resp.Body.Close()
+		if err != nil {
+			log.Errorf("close delete request body: %v", err)
+		}
+	}()
+	if resp.StatusCode != 204 {
+		if am.appMetrics != nil {
+			am.appMetrics.IDPMetrics().CountRequestStatusError()
+		}
+		return fmt.Errorf("unable to delete user, statusCode %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // checkExportJobStatus checks the status of the job created at CreateExportUsersJob.

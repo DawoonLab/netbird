@@ -6,6 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/netbirdio/netbird/client/internal/auth"
+	"github.com/netbirdio/netbird/client/system"
+
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -17,6 +20,8 @@ import (
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/version"
 )
+
+const probeThreshold = time.Second * 5
 
 // Server for service control.
 type Server struct {
@@ -34,12 +39,18 @@ type Server struct {
 	proto.UnimplementedDaemonServiceServer
 
 	statusRecorder *peer.Status
+
+	mgmProbe    *internal.Probe
+	signalProbe *internal.Probe
+	relayProbe  *internal.Probe
+	wgProbe     *internal.Probe
+	lastProbe   time.Time
 }
 
 type oauthAuthFlow struct {
 	expiresAt  time.Time
-	client     internal.OAuthClient
-	info       internal.DeviceAuthInfo
+	flow       auth.OAuthFlow
+	info       auth.AuthFlowInfo
 	waitCancel context.CancelFunc
 }
 
@@ -50,7 +61,11 @@ func New(ctx context.Context, configPath, logFile string) *Server {
 		latestConfigInput: internal.ConfigInput{
 			ConfigPath: configPath,
 		},
-		logFile: logFile,
+		logFile:     logFile,
+		mgmProbe:    internal.NewProbe(),
+		signalProbe: internal.NewProbe(),
+		relayProbe:  internal.NewProbe(),
+		wgProbe:     internal.NewProbe(),
 	}
 }
 
@@ -91,7 +106,7 @@ func (s *Server) Start() error {
 	}
 
 	// if configuration exists, we just start connections.
-	config, _ = internal.UpdateOldManagementPort(ctx, config, s.latestConfigInput.ConfigPath)
+	config, _ = internal.UpdateOldManagementURL(ctx, config, s.latestConfigInput.ConfigPath)
 
 	s.config = config
 
@@ -102,7 +117,7 @@ func (s *Server) Start() error {
 	}
 
 	go func() {
-		if err := internal.RunClient(ctx, config, s.statusRecorder, nil, nil, nil); err != nil {
+		if err := internal.RunClientWithProbes(ctx, config, s.statusRecorder, s.mgmProbe, s.signalProbe, s.relayProbe, s.wgProbe); err != nil {
 			log.Errorf("init connections: %v", err)
 		}
 	}()
@@ -179,9 +194,32 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		s.latestConfigInput.CustomDNSAddress = []byte{}
 	}
 
+	if msg.Hostname != "" {
+		// nolint
+		ctx = context.WithValue(ctx, system.DeviceNameCtxKey, msg.Hostname)
+	}
+
+	if msg.RosenpassEnabled != nil {
+		inputConfig.RosenpassEnabled = msg.RosenpassEnabled
+		s.latestConfigInput.RosenpassEnabled = msg.RosenpassEnabled
+	}
+
+	if msg.InterfaceName != nil {
+		inputConfig.InterfaceName = msg.InterfaceName
+		s.latestConfigInput.InterfaceName = msg.InterfaceName
+	}
+
+	if msg.WireguardPort != nil {
+		port := int(*msg.WireguardPort)
+		inputConfig.WireguardPort = &port
+		s.latestConfigInput.WireguardPort = &port
+	}
+
 	s.mutex.Unlock()
 
-	inputConfig.PreSharedKey = &msg.PreSharedKey
+	if msg.OptionalPreSharedKey != nil {
+		inputConfig.PreSharedKey = msg.OptionalPreSharedKey
+	}
 
 	config, err := internal.UpdateOrCreateConfig(inputConfig)
 	if err != nil {
@@ -189,7 +227,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	}
 
 	if msg.ManagementUrl == "" {
-		config, _ = internal.UpdateOldManagementPort(ctx, config, s.latestConfigInput.ConfigPath)
+		config, _ = internal.UpdateOldManagementURL(ctx, config, s.latestConfigInput.ConfigPath)
 		s.config = config
 		s.latestConfigInput.ManagementURL = config.ManagementURL.String()
 	}
@@ -206,28 +244,15 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	state.Set(internal.StatusConnecting)
 
 	if msg.SetupKey == "" {
-		providerConfig, err := internal.GetDeviceAuthorizationFlowInfo(ctx, config.PrivateKey, config.ManagementURL)
+		oAuthFlow, err := auth.NewOAuthFlow(ctx, config, msg.IsLinuxDesktopClient)
 		if err != nil {
 			state.Set(internal.StatusLoginFailed)
-			s, ok := gstatus.FromError(err)
-			if ok && s.Code() == codes.NotFound {
-				return nil, gstatus.Errorf(codes.NotFound, "no SSO provider returned from management. "+
-					"If you are using hosting Netbird see documentation at "+
-					"https://github.com/netbirdio/netbird/tree/main/management for details")
-			} else if ok && s.Code() == codes.Unimplemented {
-				return nil, gstatus.Errorf(codes.Unimplemented, "the management server, %s, does not support SSO providers, "+
-					"please update your server or use Setup Keys to login", config.ManagementURL)
-			} else {
-				log.Errorf("getting device authorization flow info failed with error: %v", err)
-				return nil, err
-			}
+			return nil, err
 		}
 
-		hostedClient := internal.NewHostedDeviceFlow(providerConfig.ProviderConfig)
-
-		if s.oauthAuthFlow.client != nil && s.oauthAuthFlow.client.GetClientID(ctx) == hostedClient.GetClientID(context.TODO()) {
+		if s.oauthAuthFlow.flow != nil && s.oauthAuthFlow.flow.GetClientID(ctx) == oAuthFlow.GetClientID(context.TODO()) {
 			if s.oauthAuthFlow.expiresAt.After(time.Now().Add(90 * time.Second)) {
-				log.Debugf("using previous device flow info")
+				log.Debugf("using previous oauth flow info")
 				return &proto.LoginResponse{
 					NeedsSSOLogin:           true,
 					VerificationURI:         s.oauthAuthFlow.info.VerificationURI,
@@ -242,25 +267,25 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 			}
 		}
 
-		deviceAuthInfo, err := hostedClient.RequestDeviceCode(context.TODO())
+		authInfo, err := oAuthFlow.RequestAuthInfo(context.TODO())
 		if err != nil {
-			log.Errorf("getting a request device code failed: %v", err)
+			log.Errorf("getting a request OAuth flow failed: %v", err)
 			return nil, err
 		}
 
 		s.mutex.Lock()
-		s.oauthAuthFlow.client = hostedClient
-		s.oauthAuthFlow.info = deviceAuthInfo
-		s.oauthAuthFlow.expiresAt = time.Now().Add(time.Duration(deviceAuthInfo.ExpiresIn) * time.Second)
+		s.oauthAuthFlow.flow = oAuthFlow
+		s.oauthAuthFlow.info = authInfo
+		s.oauthAuthFlow.expiresAt = time.Now().Add(time.Duration(authInfo.ExpiresIn) * time.Second)
 		s.mutex.Unlock()
 
 		state.Set(internal.StatusNeedsLogin)
 
 		return &proto.LoginResponse{
 			NeedsSSOLogin:           true,
-			VerificationURI:         deviceAuthInfo.VerificationURI,
-			VerificationURIComplete: deviceAuthInfo.VerificationURIComplete,
-			UserCode:                deviceAuthInfo.UserCode,
+			VerificationURI:         authInfo.VerificationURI,
+			VerificationURIComplete: authInfo.VerificationURIComplete,
+			UserCode:                authInfo.UserCode,
 		}, nil
 	}
 
@@ -286,11 +311,16 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
+	if msg.Hostname != "" {
+		// nolint
+		ctx = context.WithValue(ctx, system.DeviceNameCtxKey, msg.Hostname)
+	}
+
 	s.actCancel = cancel
 	s.mutex.Unlock()
 
-	if s.oauthAuthFlow.client == nil {
-		return nil, gstatus.Errorf(codes.Internal, "oauth client is not initialized")
+	if s.oauthAuthFlow.flow == nil {
+		return nil, gstatus.Errorf(codes.Internal, "oauth flow is not initialized")
 	}
 
 	state := internal.CtxGetState(ctx)
@@ -304,10 +334,10 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	state.Set(internal.StatusConnecting)
 
 	s.mutex.Lock()
-	deviceAuthInfo := s.oauthAuthFlow.info
+	flowInfo := s.oauthAuthFlow.info
 	s.mutex.Unlock()
 
-	if deviceAuthInfo.UserCode != msg.UserCode {
+	if flowInfo.UserCode != msg.UserCode {
 		state.Set(internal.StatusLoginFailed)
 		return nil, gstatus.Errorf(codes.InvalidArgument, "sso user code is invalid")
 	}
@@ -324,10 +354,10 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	s.oauthAuthFlow.waitCancel = cancel
 	s.mutex.Unlock()
 
-	tokenInfo, err := s.oauthAuthFlow.client.WaitToken(waitCTX, deviceAuthInfo)
+	tokenInfo, err := s.oauthAuthFlow.flow.WaitToken(waitCTX, flowInfo)
 	if err != nil {
 		if err == context.Canceled {
-			return nil, nil
+			return nil, nil //nolint:nilnil
 		}
 		s.mutex.Lock()
 		s.oauthAuthFlow.expiresAt = time.Now()
@@ -391,7 +421,7 @@ func (s *Server) Up(callerCtx context.Context, _ *proto.UpRequest) (*proto.UpRes
 	}
 
 	go func() {
-		if err := internal.RunClient(ctx, s.config, s.statusRecorder, nil, nil, nil); err != nil {
+		if err := internal.RunClientWithProbes(ctx, s.config, s.statusRecorder, s.mgmProbe, s.signalProbe, s.relayProbe, s.wgProbe); err != nil {
 			log.Errorf("run client connection: %v", err)
 			return
 		}
@@ -415,7 +445,7 @@ func (s *Server) Down(_ context.Context, _ *proto.DownRequest) (*proto.DownRespo
 	return &proto.DownResponse{}, nil
 }
 
-// Status starts engine work in the daemon.
+// Status returns the daemon status
 func (s *Server) Status(
 	_ context.Context,
 	msg *proto.StatusRequest,
@@ -437,12 +467,28 @@ func (s *Server) Status(
 	}
 
 	if msg.GetFullPeerStatus {
+		s.runProbes()
+
 		fullStatus := s.statusRecorder.GetFullStatus()
 		pbFullStatus := toProtoFullStatus(fullStatus)
 		statusResponse.FullStatus = pbFullStatus
 	}
 
 	return &statusResponse, nil
+}
+
+func (s *Server) runProbes() {
+	if time.Since(s.lastProbe) > probeThreshold {
+		managementHealthy := s.mgmProbe.Probe()
+		signalHealthy := s.signalProbe.Probe()
+		relayHealthy := s.relayProbe.Probe()
+		wgProbe := s.wgProbe.Probe()
+
+		// Update last time only if all probes were successful
+		if managementHealthy && signalHealthy && relayHealthy && wgProbe {
+			s.lastProbe = time.Now()
+		}
+	}
 }
 
 // GetConfig of the daemon.
@@ -485,13 +531,20 @@ func toProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
 		SignalState:     &proto.SignalState{},
 		LocalPeerState:  &proto.LocalPeerState{},
 		Peers:           []*proto.PeerState{},
+		Relays:          []*proto.RelayState{},
 	}
 
 	pbFullStatus.ManagementState.URL = fullStatus.ManagementState.URL
 	pbFullStatus.ManagementState.Connected = fullStatus.ManagementState.Connected
+	if err := fullStatus.ManagementState.Error; err != nil {
+		pbFullStatus.ManagementState.Error = err.Error()
+	}
 
 	pbFullStatus.SignalState.URL = fullStatus.SignalState.URL
 	pbFullStatus.SignalState.Connected = fullStatus.SignalState.Connected
+	if err := fullStatus.SignalState.Error; err != nil {
+		pbFullStatus.SignalState.Error = err.Error()
+	}
 
 	pbFullStatus.LocalPeerState.IP = fullStatus.LocalPeerState.IP
 	pbFullStatus.LocalPeerState.PubKey = fullStatus.LocalPeerState.PubKey
@@ -500,17 +553,34 @@ func toProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
 
 	for _, peerState := range fullStatus.Peers {
 		pbPeerState := &proto.PeerState{
-			IP:                     peerState.IP,
-			PubKey:                 peerState.PubKey,
-			ConnStatus:             peerState.ConnStatus.String(),
-			ConnStatusUpdate:       timestamppb.New(peerState.ConnStatusUpdate),
-			Relayed:                peerState.Relayed,
-			Direct:                 peerState.Direct,
-			LocalIceCandidateType:  peerState.LocalIceCandidateType,
-			RemoteIceCandidateType: peerState.RemoteIceCandidateType,
-			Fqdn:                   peerState.FQDN,
+			IP:                         peerState.IP,
+			PubKey:                     peerState.PubKey,
+			ConnStatus:                 peerState.ConnStatus.String(),
+			ConnStatusUpdate:           timestamppb.New(peerState.ConnStatusUpdate),
+			Relayed:                    peerState.Relayed,
+			Direct:                     peerState.Direct,
+			LocalIceCandidateType:      peerState.LocalIceCandidateType,
+			RemoteIceCandidateType:     peerState.RemoteIceCandidateType,
+			LocalIceCandidateEndpoint:  peerState.LocalIceCandidateEndpoint,
+			RemoteIceCandidateEndpoint: peerState.RemoteIceCandidateEndpoint,
+			Fqdn:                       peerState.FQDN,
+			LastWireguardHandshake:     timestamppb.New(peerState.LastWireguardHandshake),
+			BytesRx:                    peerState.BytesRx,
+			BytesTx:                    peerState.BytesTx,
 		}
 		pbFullStatus.Peers = append(pbFullStatus.Peers, pbPeerState)
 	}
+
+	for _, relayState := range fullStatus.Relays {
+		pbRelayState := &proto.RelayState{
+			URI:       relayState.URI.String(),
+			Available: relayState.Err == nil,
+		}
+		if err := relayState.Err; err != nil {
+			pbRelayState.Error = err.Error()
+		}
+		pbFullStatus.Relays = append(pbFullStatus.Relays, pbRelayState)
+	}
+
 	return &pbFullStatus
 }

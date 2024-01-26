@@ -108,6 +108,8 @@ func NewJWTValidator(issuer string, audienceList []string, keysLocation string, 
 						refreshedKeys = keys
 					}
 
+					log.Debugf("keys refreshed, new UTC expiration time: %s", refreshedKeys.expiresInTime.UTC())
+
 					keys = refreshedKeys
 				}
 			}
@@ -141,7 +143,7 @@ func (m *JWTValidator) ValidateAndParse(token string) (*jwt.Token, error) {
 		if m.options.CredentialsOptional {
 			log.Debugf("no credentials found (CredentialsOptional=true)")
 			// No error, just no token (and that is ok given that CredentialsOptional is true)
-			return nil, nil
+			return nil, nil //nolint:nilnil
 		}
 
 		// If we get here, the required token is missing
@@ -155,7 +157,7 @@ func (m *JWTValidator) ValidateAndParse(token string) (*jwt.Token, error) {
 
 	// Check if there was an error in parsing...
 	if err != nil {
-		log.Debugf("error parsing token: %v", err)
+		log.Errorf("error parsing token: %v", err)
 		return nil, fmt.Errorf("Error parsing token: %w", err)
 	}
 
@@ -179,7 +181,7 @@ func (m *JWTValidator) ValidateAndParse(token string) (*jwt.Token, error) {
 
 // stillValid returns true if the JSONWebKey still valid and have enough time to be used
 func (jwks *Jwks) stillValid() bool {
-	return jwks.expiresInTime.IsZero() && time.Now().Add(5*time.Second).Before(jwks.expiresInTime)
+	return !jwks.expiresInTime.IsZero() && time.Now().Add(5*time.Second).Before(jwks.expiresInTime)
 }
 
 func getPemKeys(keysLocation string) (*Jwks, error) {
@@ -219,7 +221,7 @@ func getPemCert(token *jwt.Token, jwks *Jwks) (string, error) {
 		return generatePemFromJWK(jwks.Keys[k])
 	}
 
-	return "", errors.New("unable to find appropriate key")
+	return cert, errors.New("unable to find appropriate key")
 }
 
 func generatePemFromJWK(jwk JSONWebKey) (string, error) {

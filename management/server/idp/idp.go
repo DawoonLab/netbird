@@ -9,14 +9,21 @@ import (
 	"github.com/netbirdio/netbird/management/server/telemetry"
 )
 
+const (
+	// UnsetAccountID is a special key to map users without an account ID
+	UnsetAccountID = "unset"
+)
+
 // Manager idp manager interface
 type Manager interface {
 	UpdateUserAppMetadata(userId string, appMetadata AppMetadata) error
 	GetUserDataByID(userId string, appMetadata AppMetadata) (*UserData, error)
 	GetAccount(accountId string) ([]*UserData, error)
 	GetAllAccounts() (map[string][]*UserData, error)
-	CreateUser(email string, name string, accountID string) (*UserData, error)
+	CreateUser(email, name, accountID, invitedByEmail string) (*UserData, error)
 	GetUserByEmail(email string) ([]*UserData, error)
+	InviteUserByID(userID string) error
+	DeleteUser(userID string) error
 }
 
 // ClientConfig defines common client configuration for all IdP manager
@@ -36,10 +43,10 @@ type Config struct {
 	ManagerType               string
 	ClientConfig              *ClientConfig
 	ExtraConfig               ExtraConfig
-	Auth0ClientCredentials    Auth0ClientConfig
-	AzureClientCredentials    AzureClientConfig
-	KeycloakClientCredentials KeycloakClientConfig
-	ZitadelClientCredentials  ZitadelClientConfig
+	Auth0ClientCredentials    *Auth0ClientConfig
+	AzureClientCredentials    *AzureClientConfig
+	KeycloakClientCredentials *KeycloakClientConfig
+	ZitadelClientCredentials  *ZitadelClientConfig
 }
 
 // ManagerCredentials interface that authenticates using the credential of each type of idp
@@ -70,7 +77,8 @@ type AppMetadata struct {
 	// WTAccountID is a NetBird (previously Wiretrustee) account id to update in the IDP
 	// maps to wt_account_id when json.marshal
 	WTAccountID     string `json:"wt_account_id,omitempty"`
-	WTPendingInvite *bool  `json:"wt_pending_invite"`
+	WTPendingInvite *bool  `json:"wt_pending_invite,omitempty"`
+	WTInvitedBy     string `json:"wt_invited_by_email,omitempty"`
 }
 
 // JWTToken a JWT object that holds information of a token
@@ -90,11 +98,11 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 
 	switch strings.ToLower(config.ManagerType) {
 	case "none", "":
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	case "auth0":
 		auth0ClientConfig := config.Auth0ClientCredentials
 		if config.ClientConfig != nil {
-			auth0ClientConfig = Auth0ClientConfig{
+			auth0ClientConfig = &Auth0ClientConfig{
 				Audience:     config.ExtraConfig["Audience"],
 				AuthIssuer:   config.ClientConfig.Issuer,
 				ClientID:     config.ClientConfig.ClientID,
@@ -103,11 +111,11 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 			}
 		}
 
-		return NewAuth0Manager(auth0ClientConfig, appMetrics)
+		return NewAuth0Manager(*auth0ClientConfig, appMetrics)
 	case "azure":
 		azureClientConfig := config.AzureClientCredentials
 		if config.ClientConfig != nil {
-			azureClientConfig = AzureClientConfig{
+			azureClientConfig = &AzureClientConfig{
 				ClientID:         config.ClientConfig.ClientID,
 				ClientSecret:     config.ClientConfig.ClientSecret,
 				GrantType:        config.ClientConfig.GrantType,
@@ -117,11 +125,11 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 			}
 		}
 
-		return NewAzureManager(azureClientConfig, appMetrics)
+		return NewAzureManager(*azureClientConfig, appMetrics)
 	case "keycloak":
 		keycloakClientConfig := config.KeycloakClientCredentials
 		if config.ClientConfig != nil {
-			keycloakClientConfig = KeycloakClientConfig{
+			keycloakClientConfig = &KeycloakClientConfig{
 				ClientID:      config.ClientConfig.ClientID,
 				ClientSecret:  config.ClientConfig.ClientSecret,
 				GrantType:     config.ClientConfig.GrantType,
@@ -130,11 +138,11 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 			}
 		}
 
-		return NewKeycloakManager(keycloakClientConfig, appMetrics)
+		return NewKeycloakManager(*keycloakClientConfig, appMetrics)
 	case "zitadel":
 		zitadelClientConfig := config.ZitadelClientCredentials
 		if config.ClientConfig != nil {
-			zitadelClientConfig = ZitadelClientConfig{
+			zitadelClientConfig = &ZitadelClientConfig{
 				ClientID:           config.ClientConfig.ClientID,
 				ClientSecret:       config.ClientConfig.ClientSecret,
 				GrantType:          config.ClientConfig.GrantType,
@@ -143,7 +151,7 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 			}
 		}
 
-		return NewZitadelManager(zitadelClientConfig, appMetrics)
+		return NewZitadelManager(*zitadelClientConfig, appMetrics)
 	case "authentik":
 		authentikConfig := AuthentikClientConfig{
 			Issuer:        config.ClientConfig.Issuer,
@@ -162,7 +170,17 @@ func NewManager(config Config, appMetrics telemetry.AppMetrics) (Manager, error)
 			APIToken:      config.ExtraConfig["ApiToken"],
 		}
 		return NewOktaManager(oktaClientConfig, appMetrics)
-
+	case "google":
+		googleClientConfig := GoogleWorkspaceClientConfig{
+			ServiceAccountKey: config.ExtraConfig["ServiceAccountKey"],
+			CustomerID:        config.ExtraConfig["CustomerId"],
+		}
+		return NewGoogleWorkspaceManager(googleClientConfig, appMetrics)
+	case "jumpcloud":
+		jumpcloudConfig := JumpCloudClientConfig{
+			APIToken: config.ExtraConfig["ApiToken"],
+		}
+		return NewJumpCloudManager(jumpcloudConfig, appMetrics)
 	default:
 		return nil, fmt.Errorf("invalid manager type: %s", config.ManagerType)
 	}

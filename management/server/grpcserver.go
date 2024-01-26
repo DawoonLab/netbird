@@ -7,11 +7,6 @@ import (
 	"time"
 
 	pb "github.com/golang/protobuf/proto" // nolint
-
-	"github.com/netbirdio/netbird/management/server/telemetry"
-
-	"github.com/netbirdio/netbird/management/server/jwtclaims"
-
 	"github.com/golang/protobuf/ptypes/timestamp"
 	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -21,7 +16,10 @@ import (
 
 	"github.com/netbirdio/netbird/encryption"
 	"github.com/netbirdio/netbird/management/proto"
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	internalStatus "github.com/netbirdio/netbird/management/server/status"
+	"github.com/netbirdio/netbird/management/server/telemetry"
 )
 
 // GRPCServer an instance of a Management gRPC API server
@@ -35,12 +33,11 @@ type GRPCServer struct {
 	jwtValidator           *jwtclaims.JWTValidator
 	jwtClaimsExtractor     *jwtclaims.ClaimsExtractor
 	appMetrics             telemetry.AppMetrics
+	ephemeralManager       *EphemeralManager
 }
 
 // NewServer creates a new Management server
-func NewServer(config *Config, accountManager AccountManager, peersUpdateManager *PeersUpdateManager,
-	turnCredentialsManager TURNCredentialsManager, appMetrics telemetry.AppMetrics,
-) (*GRPCServer, error) {
+func NewServer(config *Config, accountManager AccountManager, peersUpdateManager *PeersUpdateManager, turnCredentialsManager TURNCredentialsManager, appMetrics telemetry.AppMetrics, ephemeralManager *EphemeralManager) (*GRPCServer, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return nil, err
@@ -92,6 +89,7 @@ func NewServer(config *Config, accountManager AccountManager, peersUpdateManager
 		jwtValidator:           jwtValidator,
 		jwtClaimsExtractor:     jwtClaimsExtractor,
 		appMetrics:             appMetrics,
+		ephemeralManager:       ephemeralManager,
 	}, nil
 }
 
@@ -141,6 +139,9 @@ func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementServi
 	}
 
 	updates := s.peersUpdateManager.CreateChannel(peer.ID)
+
+	s.ephemeralManager.OnPeerConnected(peer)
+
 	err = s.accountManager.MarkPeerConnected(peerKey.String(), true)
 	if err != nil {
 		log.Warnf("failed marking peer as connected %s %v", peerKey, err)
@@ -159,15 +160,21 @@ func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementServi
 		select {
 		// condition when there are some updates
 		case update, open := <-updates:
+
+			if s.appMetrics != nil {
+				s.appMetrics.GRPCMetrics().UpdateChannelQueueLength(len(updates) + 1)
+			}
+
 			if !open {
 				log.Debugf("updates channel for peer %s was closed", peerKey.String())
 				s.cancelPeerRoutines(peer)
 				return nil
 			}
-			log.Debugf("recevied an update for peer %s", peerKey.String())
+			log.Debugf("received an update for peer %s", peerKey.String())
 
 			encryptedResp, err := encryption.EncryptMessage(peerKey, s.wgKey, update.Update)
 			if err != nil {
+				s.cancelPeerRoutines(peer)
 				return status.Errorf(codes.Internal, "failed processing update message")
 			}
 
@@ -176,6 +183,7 @@ func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementServi
 				Body:     encryptedResp,
 			})
 			if err != nil {
+				s.cancelPeerRoutines(peer)
 				return status.Errorf(codes.Internal, "failed sending update message")
 			}
 			log.Debugf("sent an update to peer %s", peerKey.String())
@@ -189,10 +197,11 @@ func (s *GRPCServer) Sync(req *proto.EncryptedMessage, srv proto.ManagementServi
 	}
 }
 
-func (s *GRPCServer) cancelPeerRoutines(peer *Peer) {
+func (s *GRPCServer) cancelPeerRoutines(peer *nbpeer.Peer) {
 	s.peersUpdateManager.CloseChannel(peer.ID)
 	s.turnCredentialsManager.CancelRefresh(peer.ID)
 	_ = s.accountManager.MarkPeerConnected(peer.Key, false)
+	s.ephemeralManager.OnPeerDisconnected(peer)
 }
 
 func (s *GRPCServer) validateToken(jwtToken string) (string, error) {
@@ -209,6 +218,10 @@ func (s *GRPCServer) validateToken(jwtToken string) (string, error) {
 	_, _, err = s.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "unable to fetch account with claims, err: %v", err)
+	}
+
+	if err := s.accountManager.CheckUserAccessByJWTGroups(claims); err != nil {
+		return "", status.Errorf(codes.PermissionDenied, err.Error())
 	}
 
 	return claims.UserId, nil
@@ -235,8 +248,8 @@ func mapError(err error) error {
 	return status.Errorf(codes.Internal, "failed handling request")
 }
 
-func extractPeerMeta(loginReq *proto.LoginRequest) PeerSystemMeta {
-	return PeerSystemMeta{
+func extractPeerMeta(loginReq *proto.LoginRequest) nbpeer.PeerSystemMeta {
+	return nbpeer.PeerSystemMeta{
 		Hostname:  loginReq.GetMeta().GetHostname(),
 		GoOS:      loginReq.GetMeta().GetGoOS(),
 		Kernel:    loginReq.GetMeta().GetKernel(),
@@ -303,7 +316,7 @@ func (s *GRPCServer) Login(ctx context.Context, req *proto.EncryptedMessage) (*p
 		userID, err = s.validateToken(loginReq.GetJwtToken())
 		if err != nil {
 			log.Warnf("failed validating JWT token sent from peer %s", peerKey)
-			return nil, mapError(err)
+			return nil, err
 		}
 	}
 	var sshKey []byte
@@ -318,9 +331,15 @@ func (s *GRPCServer) Login(ctx context.Context, req *proto.EncryptedMessage) (*p
 		UserID:          userID,
 		SetupKey:        loginReq.GetSetupKey(),
 	})
+
 	if err != nil {
 		log.Warnf("failed logging in peer %s", peerKey)
 		return nil, mapError(err)
+	}
+
+	// if the login request contains setup key then it is a registration request
+	if loginReq.GetSetupKey() != "" {
+		s.ephemeralManager.OnPeerDisconnected(peer)
 	}
 
 	// if peer has reached this point then it has logged in
@@ -399,7 +418,7 @@ func toWiretrusteeConfig(config *Config, turnCredentials *TURNCredentials) *prot
 	}
 }
 
-func toPeerConfig(peer *Peer, network *Network, dnsName string) *proto.PeerConfig {
+func toPeerConfig(peer *nbpeer.Peer, network *Network, dnsName string) *proto.PeerConfig {
 	netmask, _ := network.Net.Mask.Size()
 	fqdn := peer.FQDN(dnsName)
 	return &proto.PeerConfig{
@@ -409,7 +428,7 @@ func toPeerConfig(peer *Peer, network *Network, dnsName string) *proto.PeerConfi
 	}
 }
 
-func toRemotePeerConfig(peers []*Peer, dnsName string) []*proto.RemotePeerConfig {
+func toRemotePeerConfig(peers []*nbpeer.Peer, dnsName string) []*proto.RemotePeerConfig {
 	remotePeers := []*proto.RemotePeerConfig{}
 	for _, rPeer := range peers {
 		fqdn := rPeer.FQDN(dnsName)
@@ -423,7 +442,7 @@ func toRemotePeerConfig(peers []*Peer, dnsName string) []*proto.RemotePeerConfig
 	return remotePeers
 }
 
-func toSyncResponse(config *Config, peer *Peer, turnCredentials *TURNCredentials, networkMap *NetworkMap, dnsName string) *proto.SyncResponse {
+func toSyncResponse(config *Config, peer *nbpeer.Peer, turnCredentials *TURNCredentials, networkMap *NetworkMap, dnsName string) *proto.SyncResponse {
 	wtConfig := toWiretrusteeConfig(config, turnCredentials)
 
 	pConfig := toPeerConfig(peer, networkMap.Network, dnsName)
@@ -463,7 +482,7 @@ func (s *GRPCServer) IsHealthy(ctx context.Context, req *proto.Empty) (*proto.Em
 }
 
 // sendInitialSync sends initial proto.SyncResponse to the peer requesting synchronization
-func (s *GRPCServer) sendInitialSync(peerKey wgtypes.Key, peer *Peer, networkMap *NetworkMap, srv proto.ManagementService_SyncServer) error {
+func (s *GRPCServer) sendInitialSync(peerKey wgtypes.Key, peer *nbpeer.Peer, networkMap *NetworkMap, srv proto.ManagementService_SyncServer) error {
 	// make secret time based TURN credentials optional
 	var turnCredentials *TURNCredentials
 	if s.config.TURNConfig.TimeBasedCredentials {
@@ -536,6 +555,52 @@ func (s *GRPCServer) GetDeviceAuthorizationFlow(ctx context.Context, req *proto.
 	encryptedResp, err := encryption.EncryptMessage(peerKey, s.wgKey, flowInfoResp)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to encrypt no device authorization flow information")
+	}
+
+	return &proto.EncryptedMessage{
+		WgPubKey: s.wgKey.PublicKey().String(),
+		Body:     encryptedResp,
+	}, nil
+}
+
+// GetPKCEAuthorizationFlow returns a pkce authorization flow information
+// This is used for initiating an Oauth 2 pkce authorization grant flow
+// which will be used by our clients to Login
+func (s *GRPCServer) GetPKCEAuthorizationFlow(_ context.Context, req *proto.EncryptedMessage) (*proto.EncryptedMessage, error) {
+	peerKey, err := wgtypes.ParseKey(req.GetWgPubKey())
+	if err != nil {
+		errMSG := fmt.Sprintf("error while parsing peer's Wireguard public key %s on GetPKCEAuthorizationFlow request.", req.WgPubKey)
+		log.Warn(errMSG)
+		return nil, status.Error(codes.InvalidArgument, errMSG)
+	}
+
+	err = encryption.DecryptMessage(peerKey, s.wgKey, req.Body, &proto.PKCEAuthorizationFlowRequest{})
+	if err != nil {
+		errMSG := fmt.Sprintf("error while decrypting peer's message with Wireguard public key %s.", req.WgPubKey)
+		log.Warn(errMSG)
+		return nil, status.Error(codes.InvalidArgument, errMSG)
+	}
+
+	if s.config.PKCEAuthorizationFlow == nil {
+		return nil, status.Error(codes.NotFound, "no pkce authorization flow information available")
+	}
+
+	flowInfoResp := &proto.PKCEAuthorizationFlow{
+		ProviderConfig: &proto.ProviderConfig{
+			Audience:              s.config.PKCEAuthorizationFlow.ProviderConfig.Audience,
+			ClientID:              s.config.PKCEAuthorizationFlow.ProviderConfig.ClientID,
+			ClientSecret:          s.config.PKCEAuthorizationFlow.ProviderConfig.ClientSecret,
+			TokenEndpoint:         s.config.PKCEAuthorizationFlow.ProviderConfig.TokenEndpoint,
+			AuthorizationEndpoint: s.config.PKCEAuthorizationFlow.ProviderConfig.AuthorizationEndpoint,
+			Scope:                 s.config.PKCEAuthorizationFlow.ProviderConfig.Scope,
+			RedirectURLs:          s.config.PKCEAuthorizationFlow.ProviderConfig.RedirectURLs,
+			UseIDToken:            s.config.PKCEAuthorizationFlow.ProviderConfig.UseIDToken,
+		},
+	}
+
+	encryptedResp, err := encryption.EncryptMessage(peerKey, s.wgKey, flowInfoResp)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to encrypt no pkce authorization flow information")
 	}
 
 	return &proto.EncryptedMessage{

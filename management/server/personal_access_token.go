@@ -26,7 +26,9 @@ const (
 
 // PersonalAccessToken holds all information about a PAT including a hashed version of it for verification
 type PersonalAccessToken struct {
-	ID             string
+	ID string `gorm:"primaryKey"`
+	// User is a reference to Account that this object belongs
+	UserID         string `gorm:"index"`
 	Name           string
 	HashedToken    string
 	ExpirationDate time.Time
@@ -34,6 +36,18 @@ type PersonalAccessToken struct {
 	CreatedBy string
 	CreatedAt time.Time
 	LastUsed  time.Time
+}
+
+func (t *PersonalAccessToken) Copy() *PersonalAccessToken {
+	return &PersonalAccessToken{
+		ID:             t.ID,
+		Name:           t.Name,
+		HashedToken:    t.HashedToken,
+		ExpirationDate: t.ExpirationDate,
+		CreatedBy:      t.CreatedBy,
+		CreatedAt:      t.CreatedAt,
+		LastUsed:       t.LastUsed,
+	}
 }
 
 // PersonalAccessTokenGenerated holds the new PersonalAccessToken and the plain text version of it

@@ -6,6 +6,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 
+	"github.com/netbirdio/management-integrations/integrations"
+
 	s "github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/http/middleware"
 	"github.com/netbirdio/netbird/management/server/jwtclaims"
@@ -32,11 +34,20 @@ type emptyObject struct {
 
 // APIHandler creates the Management service HTTP API handler registering all the available endpoints.
 func APIHandler(accountManager s.AccountManager, jwtValidator jwtclaims.JWTValidator, appMetrics telemetry.AppMetrics, authCfg AuthCfg) (http.Handler, error) {
+	claimsExtractor := jwtclaims.NewClaimsExtractor(
+		jwtclaims.WithAudience(authCfg.Audience),
+		jwtclaims.WithUserIDClaim(authCfg.UserIDClaim),
+	)
+
 	authMiddleware := middleware.NewAuthMiddleware(
 		accountManager.GetAccountFromPAT,
 		jwtValidator.ValidateAndParse,
 		accountManager.MarkPATUsed,
-		authCfg.Audience)
+		accountManager.CheckUserAccessByJWTGroups,
+		claimsExtractor,
+		authCfg.Audience,
+		authCfg.UserIDClaim,
+	)
 
 	corsMiddleware := cors.AllowAll()
 
@@ -57,6 +68,7 @@ func APIHandler(accountManager s.AccountManager, jwtValidator jwtclaims.JWTValid
 		AuthCfg:        authCfg,
 	}
 
+	integrations.RegisterHandlers(api.Router, accountManager, claimsExtractor)
 	api.addAccountsEndpoint()
 	api.addPeersEndpoint()
 	api.addUsersEndpoint()
@@ -72,8 +84,8 @@ func APIHandler(accountManager s.AccountManager, jwtValidator jwtclaims.JWTValid
 
 	err := api.Router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
 		methods, err := route.GetMethods()
-		if err != nil {
-			return err
+		if err != nil { // we may have wildcard routes from integrations without methods, skip them for now
+			methods = []string{}
 		}
 		for _, method := range methods {
 			template, err := route.GetPathTemplate()
@@ -97,6 +109,7 @@ func APIHandler(accountManager s.AccountManager, jwtValidator jwtclaims.JWTValid
 func (apiHandler *apiHandler) addAccountsEndpoint() {
 	accountsHandler := NewAccountsHandler(apiHandler.AccountManager, apiHandler.AuthCfg)
 	apiHandler.Router.HandleFunc("/accounts/{accountId}", accountsHandler.UpdateAccount).Methods("PUT", "OPTIONS")
+	apiHandler.Router.HandleFunc("/accounts/{accountId}", accountsHandler.DeleteAccount).Methods("DELETE", "OPTIONS")
 	apiHandler.Router.HandleFunc("/accounts", accountsHandler.GetAllAccounts).Methods("GET", "OPTIONS")
 }
 
@@ -113,6 +126,7 @@ func (apiHandler *apiHandler) addUsersEndpoint() {
 	apiHandler.Router.HandleFunc("/users/{userId}", userHandler.UpdateUser).Methods("PUT", "OPTIONS")
 	apiHandler.Router.HandleFunc("/users/{userId}", userHandler.DeleteUser).Methods("DELETE", "OPTIONS")
 	apiHandler.Router.HandleFunc("/users", userHandler.CreateUser).Methods("POST", "OPTIONS")
+	apiHandler.Router.HandleFunc("/users/{userId}/invite", userHandler.InviteUser).Methods("POST", "OPTIONS")
 }
 
 func (apiHandler *apiHandler) addUsersTokensEndpoint() {

@@ -11,20 +11,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netbirdio/netbird/management/server/http/api"
-	"github.com/netbirdio/netbird/management/server/status"
-
 	"github.com/gorilla/mux"
-
-	"github.com/netbirdio/netbird/management/server/jwtclaims"
-
 	"github.com/magiconair/properties/assert"
 
 	"github.com/netbirdio/netbird/management/server"
+	"github.com/netbirdio/netbird/management/server/http/api"
+	"github.com/netbirdio/netbird/management/server/http/util"
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
 	"github.com/netbirdio/netbird/management/server/mock_server"
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
+	"github.com/netbirdio/netbird/management/server/status"
 )
 
-var TestPeers = map[string]*server.Peer{
+var TestPeers = map[string]*nbpeer.Peer{
 	"A": {Key: "A", ID: "peer-A-ID", IP: net.ParseIP("100.100.100.100")},
 	"B": {Key: "B", ID: "peer-B-ID", IP: net.ParseIP("200.200.200.200")},
 }
@@ -42,34 +41,18 @@ func initGroupTestData(user *server.User, groups ...*server.Group) *GroupsHandle
 				if groupID != "idofthegroup" {
 					return nil, status.Errorf(status.NotFound, "not found")
 				}
+				if groupID == "id-jwt-group" {
+					return &server.Group{
+						ID:     "id-jwt-group",
+						Name:   "Default Group",
+						Issued: server.GroupIssuedJWT,
+					}, nil
+				}
 				return &server.Group{
-					ID:   "idofthegroup",
-					Name: "Group",
+					ID:     "idofthegroup",
+					Name:   "Group",
+					Issued: server.GroupIssuedAPI,
 				}, nil
-			},
-			UpdateGroupFunc: func(_ string, groupID string, operations []server.GroupUpdateOperation) (*server.Group, error) {
-				var group server.Group
-				group.ID = groupID
-				for _, operation := range operations {
-					switch operation.Type {
-					case server.UpdateGroupName:
-						group.Name = operation.Values[0]
-					case server.UpdateGroupPeers, server.InsertPeersToGroup:
-						group.Peers = operation.Values
-					case server.RemovePeersFromGroup:
-					default:
-						return nil, fmt.Errorf("no operation")
-					}
-				}
-				return &group, nil
-			},
-			GetPeerByIPFunc: func(_ string, peerIP string) (*server.Peer, error) {
-				for _, peer := range TestPeers {
-					if peer.IP.String() == peerIP {
-						return peer, nil
-					}
-				}
-				return nil, fmt.Errorf("peer not found")
 			},
 			GetAccountFromTokenFunc: func(claims jwtclaims.AuthorizationClaims) (*server.Account, *server.User, error) {
 				return &server.Account{
@@ -80,10 +63,23 @@ func initGroupTestData(user *server.User, groups ...*server.Group) *GroupsHandle
 						user.Id: user,
 					},
 					Groups: map[string]*server.Group{
-						"id-existed": {ID: "id-existed", Peers: []string{"A", "B"}},
-						"id-all":     {ID: "id-all", Name: "All"},
+						"id-jwt-group": {ID: "id-jwt-group", Name: "From JWT", Issued: server.GroupIssuedJWT},
+						"id-existed":   {ID: "id-existed", Peers: []string{"A", "B"}, Issued: server.GroupIssuedAPI},
+						"id-all":       {ID: "id-all", Name: "All", Issued: server.GroupIssuedAPI},
 					},
 				}, user, nil
+			},
+			DeleteGroupFunc: func(accountID, userId, groupID string) error {
+				if groupID == "linked-grp" {
+					return &server.GroupLinkError{
+						Resource: "something",
+						Name:     "linked-grp",
+					}
+				}
+				if groupID == "invalid-grp" {
+					return fmt.Errorf("internal error")
+				}
+				return nil
 			},
 		},
 		claimsExtractor: jwtclaims.NewClaimsExtractor(
@@ -169,6 +165,8 @@ func TestGetGroup(t *testing.T) {
 }
 
 func TestWriteGroup(t *testing.T) {
+	groupIssuedAPI := "api"
+	groupIssuedJWT := "jwt"
 	tt := []struct {
 		name           string
 		expectedStatus int
@@ -187,8 +185,9 @@ func TestWriteGroup(t *testing.T) {
 			expectedStatus: http.StatusOK,
 			expectedBody:   true,
 			expectedGroup: &api.Group{
-				Id:   "id-was-set",
-				Name: "Default POSTed Group",
+				Id:     "id-was-set",
+				Name:   "Default POSTed Group",
+				Issued: &groupIssuedAPI,
 			},
 		},
 		{
@@ -208,8 +207,9 @@ func TestWriteGroup(t *testing.T) {
 				[]byte(`{"Name":"Default POSTed Group"}`)),
 			expectedStatus: http.StatusOK,
 			expectedGroup: &api.Group{
-				Id:   "id-existed",
-				Name: "Default POSTed Group",
+				Id:     "id-existed",
+				Name:   "Default POSTed Group",
+				Issued: &groupIssuedAPI,
 			},
 		},
 		{
@@ -229,6 +229,19 @@ func TestWriteGroup(t *testing.T) {
 				[]byte(`{"Name":"super"}`)),
 			expectedStatus: http.StatusUnprocessableEntity,
 			expectedBody:   false,
+		},
+		{
+			name:        "Write Group PUT not change Issue",
+			requestType: http.MethodPut,
+			requestPath: "/api/groups/id-jwt-group",
+			requestBody: bytes.NewBuffer(
+				[]byte(`{"Name":"changed","Issued":"api"}`)),
+			expectedStatus: http.StatusOK,
+			expectedGroup: &api.Group{
+				Id:     "id-jwt-group",
+				Name:   "changed",
+				Issued: &groupIssuedJWT,
+			},
 		},
 	}
 
@@ -268,6 +281,82 @@ func TestWriteGroup(t *testing.T) {
 				t.Fatalf("Sent content is not in correct json format; %v", err)
 			}
 			assert.Equal(t, got, tc.expectedGroup)
+		})
+	}
+}
+
+func TestDeleteGroup(t *testing.T) {
+	tt := []struct {
+		name           string
+		expectedStatus int
+		expectedBody   bool
+		requestType    string
+		requestPath    string
+	}{
+		{
+			name:           "Try to delete linked group",
+			requestType:    http.MethodDelete,
+			requestPath:    "/api/groups/linked-grp",
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   true,
+		},
+		{
+			name:           "Try to cause internal error",
+			requestType:    http.MethodDelete,
+			requestPath:    "/api/groups/invalid-grp",
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   true,
+		},
+		{
+			name:           "Try to cause internal error",
+			requestType:    http.MethodDelete,
+			requestPath:    "/api/groups/invalid-grp",
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   true,
+		},
+		{
+			name:           "Delete group",
+			requestType:    http.MethodDelete,
+			requestPath:    "/api/groups/any-grp",
+			expectedStatus: http.StatusOK,
+			expectedBody:   false,
+		},
+	}
+
+	adminUser := server.NewAdminUser("test_user")
+	p := initGroupTestData(adminUser)
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.requestType, tc.requestPath, nil)
+
+			router := mux.NewRouter()
+			router.HandleFunc("/api/groups/{groupId}", p.DeleteGroup).Methods("DELETE")
+			router.ServeHTTP(recorder, req)
+
+			res := recorder.Result()
+			defer res.Body.Close()
+
+			content, err := io.ReadAll(res.Body)
+			if err != nil {
+				t.Fatalf("I don't know what I expected; %v", err)
+			}
+
+			if status := recorder.Code; status != tc.expectedStatus {
+				t.Errorf("handler returned wrong status code: got %v want %v, content: %s",
+					status, tc.expectedStatus, string(content))
+				return
+			}
+
+			if tc.expectedBody {
+				got := &util.ErrorResponse{}
+
+				if err = json.Unmarshal(content, &got); err != nil {
+					t.Fatalf("Sent content is not in correct json format; %v", err)
+				}
+				assert.Equal(t, got.Code, tc.expectedStatus)
+			}
 		})
 	}
 }

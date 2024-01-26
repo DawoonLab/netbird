@@ -3,10 +3,12 @@ package routemanager
 import (
 	"context"
 	"fmt"
-	"github.com/pion/transport/v2/stdnet"
 	"net/netip"
 	"runtime"
 	"testing"
+
+	"github.com/pion/transport/v3/stdnet"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/stretchr/testify/require"
 
@@ -30,7 +32,7 @@ func TestManagerUpdateRoutes(t *testing.T) {
 		inputInitRoutes               []*route.Route
 		inputRoutes                   []*route.Route
 		inputSerial                   uint64
-		shouldCheckServerRoutes       bool
+		removeSrvRouter               bool
 		serverRoutesExpected          int
 		clientNetworkWatchersExpected int
 	}{
@@ -87,7 +89,6 @@ func TestManagerUpdateRoutes(t *testing.T) {
 				},
 			},
 			inputSerial:                   1,
-			shouldCheckServerRoutes:       runtime.GOOS == "linux",
 			serverRoutesExpected:          2,
 			clientNetworkWatchersExpected: 0,
 		},
@@ -116,8 +117,36 @@ func TestManagerUpdateRoutes(t *testing.T) {
 				},
 			},
 			inputSerial:                   1,
-			shouldCheckServerRoutes:       runtime.GOOS == "linux",
 			serverRoutesExpected:          1,
+			clientNetworkWatchersExpected: 1,
+		},
+		{
+			name: "Should Create 1 Route For Client and Skip Server Route On Empty Server Router",
+			inputRoutes: []*route.Route{
+				{
+					ID:          "a",
+					NetID:       "routeA",
+					Peer:        localPeerKey,
+					Network:     netip.MustParsePrefix("100.64.30.250/30"),
+					NetworkType: route.IPv4Network,
+					Metric:      9999,
+					Masquerade:  false,
+					Enabled:     true,
+				},
+				{
+					ID:          "b",
+					NetID:       "routeB",
+					Peer:        remotePeerKey1,
+					Network:     netip.MustParsePrefix("8.8.9.9/32"),
+					NetworkType: route.IPv4Network,
+					Metric:      9999,
+					Masquerade:  false,
+					Enabled:     true,
+				},
+			},
+			inputSerial:                   1,
+			removeSrvRouter:               true,
+			serverRoutesExpected:          0,
 			clientNetworkWatchersExpected: 1,
 		},
 		{
@@ -172,25 +201,6 @@ func TestManagerUpdateRoutes(t *testing.T) {
 				},
 			},
 			inputSerial:                   1,
-			clientNetworkWatchersExpected: 0,
-		},
-		{
-			name: "No Server Routes Should Be Added To Non Linux",
-			inputRoutes: []*route.Route{
-				{
-					ID:          "a",
-					NetID:       "routeA",
-					Peer:        localPeerKey,
-					Network:     netip.MustParsePrefix("1.2.3.4/32"),
-					NetworkType: route.IPv4Network,
-					Metric:      9999,
-					Masquerade:  false,
-					Enabled:     true,
-				},
-			},
-			inputSerial:                   1,
-			shouldCheckServerRoutes:       runtime.GOOS != "linux",
-			serverRoutesExpected:          0,
 			clientNetworkWatchersExpected: 0,
 		},
 		{
@@ -335,7 +345,6 @@ func TestManagerUpdateRoutes(t *testing.T) {
 			},
 			inputRoutes:                   []*route.Route{},
 			inputSerial:                   1,
-			shouldCheckServerRoutes:       true,
 			serverRoutesExpected:          0,
 			clientNetworkWatchersExpected: 0,
 		},
@@ -384,7 +393,6 @@ func TestManagerUpdateRoutes(t *testing.T) {
 				},
 			},
 			inputSerial:                   1,
-			shouldCheckServerRoutes:       runtime.GOOS == "linux",
 			serverRoutesExpected:          2,
 			clientNetworkWatchersExpected: 1,
 		},
@@ -392,12 +400,12 @@ func TestManagerUpdateRoutes(t *testing.T) {
 
 	for n, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-
+			peerPrivateKey, _ := wgtypes.GeneratePrivateKey()
 			newNet, err := stdnet.NewNet()
 			if err != nil {
 				t.Fatal(err)
 			}
-			wgInterface, err := iface.NewWGIFace(fmt.Sprintf("utun43%d", n), "100.65.65.2/24", iface.DefaultMTU, nil, newNet)
+			wgInterface, err := iface.NewWGIFace(fmt.Sprintf("utun43%d", n), "100.65.65.2/24", 33100, peerPrivateKey.String(), iface.DefaultMTU, newNet, nil)
 			require.NoError(t, err, "should create testing WGIface interface")
 			defer wgInterface.Close()
 
@@ -409,6 +417,10 @@ func TestManagerUpdateRoutes(t *testing.T) {
 			routeManager := NewManager(ctx, localPeerKey, wgInterface, statusRecorder, nil)
 			defer routeManager.Stop()
 
+			if testCase.removeSrvRouter {
+				routeManager.serverRouter = nil
+			}
+
 			if len(testCase.inputInitRoutes) > 0 {
 				err = routeManager.UpdateRoutes(testCase.inputSerial, testCase.inputRoutes)
 				require.NoError(t, err, "should update routes with init routes")
@@ -419,8 +431,9 @@ func TestManagerUpdateRoutes(t *testing.T) {
 
 			require.Len(t, routeManager.clientNetworks, testCase.clientNetworkWatchersExpected, "client networks size should match")
 
-			if testCase.shouldCheckServerRoutes {
-				require.Len(t, routeManager.serverRouter.routes, testCase.serverRoutesExpected, "server networks size should match")
+			if runtime.GOOS == "linux" && routeManager.serverRouter != nil {
+				sr := routeManager.serverRouter.(*defaultServerRouter)
+				require.Len(t, sr.routes, testCase.serverRoutesExpected, "server networks size should match")
 			}
 		})
 	}

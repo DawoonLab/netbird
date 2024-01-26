@@ -5,14 +5,10 @@ package dns
 import (
 	"bufio"
 	"fmt"
-	"github.com/netbirdio/netbird/iface"
-	log "github.com/sirupsen/logrus"
 	"os"
 	"strings"
-)
 
-const (
-	defaultResolvConfPath = "/etc/resolv.conf"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -25,13 +21,30 @@ const (
 
 type osManagerType int
 
-func newHostManager(wgInterface *iface.WGIface) (hostManager, error) {
+func (t osManagerType) String() string {
+	switch t {
+	case netbirdManager:
+		return "netbird"
+	case fileManager:
+		return "file"
+	case networkManager:
+		return "networkManager"
+	case systemdManager:
+		return "systemd"
+	case resolvConfManager:
+		return "resolvconf"
+	default:
+		return "unknown"
+	}
+}
+
+func newHostManager(wgInterface WGIface) (hostManager, error) {
 	osManager, err := getOSDNSManagerType()
 	if err != nil {
 		return nil, err
 	}
 
-	log.Debugf("discovered mode is: %d", osManager)
+	log.Debugf("discovered mode is: %s", osManager)
 	switch osManager {
 	case networkManager:
 		return newNetworkManagerDbusConfigurator(wgInterface)
@@ -65,11 +78,14 @@ func getOSDNSManagerType() (osManagerType, error) {
 			return netbirdManager, nil
 		}
 		if strings.Contains(text, "NetworkManager") && isDbusListenerRunning(networkManagerDest, networkManagerDbusObjectNode) && isNetworkManagerSupported() {
-			log.Debugf("is nm running on supported v? %t", isNetworkManagerSupportedVersion())
 			return networkManager, nil
 		}
 		if strings.Contains(text, "systemd-resolved") && isDbusListenerRunning(systemdResolvedDest, systemdDbusObjectNode) {
-			return systemdManager, nil
+			if checkStub() {
+				return systemdManager, nil
+			} else {
+				return fileManager, nil
+			}
 		}
 		if strings.Contains(text, "resolvconf") {
 			if isDbusListenerRunning(systemdResolvedDest, systemdDbusObjectNode) {
@@ -86,4 +102,21 @@ func getOSDNSManagerType() (osManagerType, error) {
 		}
 	}
 	return fileManager, nil
+}
+
+// checkStub checks if the stub resolver is disabled in systemd-resolved. If it is disabled, we fall back to file manager.
+func checkStub() bool {
+	rConf, err := parseDefaultResolvConf()
+	if err != nil {
+		log.Warnf("failed to parse resolv conf: %s", err)
+		return true
+	}
+
+	for _, ns := range rConf.nameServers {
+		if ns == "127.0.0.53" {
+			return true
+		}
+	}
+
+	return false
 }

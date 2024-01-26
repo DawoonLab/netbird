@@ -68,13 +68,15 @@ type SetupKeyType string
 
 // SetupKey represents a pre-authorized key used to register machines (peers)
 type SetupKey struct {
-	Id        string
+	Id string
+	// AccountID is a reference to Account that this object belongs
+	AccountID string `json:"-" gorm:"index"`
 	Key       string
 	Name      string
 	Type      SetupKeyType
 	CreatedAt time.Time
 	ExpiresAt time.Time
-	UpdatedAt time.Time
+	UpdatedAt time.Time `gorm:"autoUpdateTime:false"`
 	// Revoked indicates whether the key was revoked or not (we don't remove them for tracking purposes)
 	Revoked bool
 	// UsedTimes indicates how many times the key was used
@@ -82,21 +84,24 @@ type SetupKey struct {
 	// LastUsed last time the key was used for peer registration
 	LastUsed time.Time
 	// AutoGroups is a list of Group IDs that are auto assigned to a Peer when it uses this key to register
-	AutoGroups []string
+	AutoGroups []string `gorm:"serializer:json"`
 	// UsageLimit indicates the number of times this key can be used to enroll a machine.
 	// The value of 0 indicates the unlimited usage.
 	UsageLimit int
+	// Ephemeral indicate if the peers will be ephemeral or not
+	Ephemeral bool
 }
 
 // Copy copies SetupKey to a new object
 func (key *SetupKey) Copy() *SetupKey {
-	autoGroups := make([]string, 0)
-	autoGroups = append(autoGroups, key.AutoGroups...)
+	autoGroups := make([]string, len(key.AutoGroups))
+	copy(autoGroups, key.AutoGroups)
 	if key.UpdatedAt.IsZero() {
 		key.UpdatedAt = key.CreatedAt
 	}
 	return &SetupKey{
 		Id:         key.Id,
+		AccountID:  key.AccountID,
 		Key:        key.Key,
 		Name:       key.Name,
 		Type:       key.Type,
@@ -108,6 +113,7 @@ func (key *SetupKey) Copy() *SetupKey {
 		LastUsed:   key.LastUsed,
 		AutoGroups: autoGroups,
 		UsageLimit: key.UsageLimit,
+		Ephemeral:  key.Ephemeral,
 	}
 }
 
@@ -131,7 +137,7 @@ func (key *SetupKey) HiddenCopy(length int) *SetupKey {
 // IncrementUsage makes a copy of a key, increments the UsedTimes by 1 and sets LastUsed to now
 func (key *SetupKey) IncrementUsage() *SetupKey {
 	c := key.Copy()
-	c.UsedTimes = c.UsedTimes + 1
+	c.UsedTimes++
 	c.LastUsed = time.Now().UTC()
 	return c
 }
@@ -162,7 +168,7 @@ func (key *SetupKey) IsOverUsed() bool {
 
 // GenerateSetupKey generates a new setup key
 func GenerateSetupKey(name string, t SetupKeyType, validFor time.Duration, autoGroups []string,
-	usageLimit int) *SetupKey {
+	usageLimit int, ephemeral bool) *SetupKey {
 	key := strings.ToUpper(uuid.New().String())
 	limit := usageLimit
 	if t == SetupKeyOneOff {
@@ -180,13 +186,14 @@ func GenerateSetupKey(name string, t SetupKeyType, validFor time.Duration, autoG
 		UsedTimes:  0,
 		AutoGroups: autoGroups,
 		UsageLimit: limit,
+		Ephemeral:  ephemeral,
 	}
 }
 
 // GenerateDefaultSetupKey generates a default reusable setup key with an unlimited usage and 30 days expiration
 func GenerateDefaultSetupKey() *SetupKey {
 	return GenerateSetupKey(DefaultSetupKeyName, SetupKeyReusable, DefaultSetupKeyDuration, []string{},
-		SetupKeyUnlimitedUsage)
+		SetupKeyUnlimitedUsage, false)
 }
 
 func Hash(s string) uint32 {
@@ -201,7 +208,7 @@ func Hash(s string) uint32 {
 // CreateSetupKey generates a new setup key with a given name, type, list of groups IDs to auto-assign to peers registered with this key,
 // and adds it to the specified account. A list of autoGroups IDs can be empty.
 func (am *DefaultAccountManager) CreateSetupKey(accountID string, keyName string, keyType SetupKeyType,
-	expiresIn time.Duration, autoGroups []string, usageLimit int, userID string) (*SetupKey, error) {
+	expiresIn time.Duration, autoGroups []string, usageLimit int, userID string, ephemeral bool) (*SetupKey, error) {
 	unlock := am.Store.AcquireAccountLock(accountID)
 	defer unlock()
 
@@ -221,19 +228,19 @@ func (am *DefaultAccountManager) CreateSetupKey(accountID string, keyName string
 		}
 	}
 
-	setupKey := GenerateSetupKey(keyName, keyType, keyDuration, autoGroups, usageLimit)
+	setupKey := GenerateSetupKey(keyName, keyType, keyDuration, autoGroups, usageLimit, ephemeral)
 	account.SetupKeys[setupKey.Key] = setupKey
 	err = am.Store.SaveAccount(account)
 	if err != nil {
 		return nil, status.Errorf(status.Internal, "failed adding account key")
 	}
 
-	am.storeEvent(userID, setupKey.Id, accountID, activity.SetupKeyCreated, setupKey.EventMeta())
+	am.StoreEvent(userID, setupKey.Id, accountID, activity.SetupKeyCreated, setupKey.EventMeta())
 
 	for _, g := range setupKey.AutoGroups {
 		group := account.GetGroup(g)
 		if group != nil {
-			am.storeEvent(userID, setupKey.Id, accountID, activity.GroupAddedToSetupKey,
+			am.StoreEvent(userID, setupKey.Id, accountID, activity.GroupAddedToSetupKey,
 				map[string]any{"group": group.Name, "group_id": group.ID, "setupkey": setupKey.Name})
 		} else {
 			log.Errorf("group %s not found while saving setup key activity event of account %s", g, account.Id)
@@ -285,7 +292,7 @@ func (am *DefaultAccountManager) SaveSetupKey(accountID string, keyToSave *Setup
 	}
 
 	if !oldKey.Revoked && newKey.Revoked {
-		am.storeEvent(userID, newKey.Id, accountID, activity.SetupKeyRevoked, newKey.EventMeta())
+		am.StoreEvent(userID, newKey.Id, accountID, activity.SetupKeyRevoked, newKey.EventMeta())
 	}
 
 	defer func() {
@@ -294,7 +301,7 @@ func (am *DefaultAccountManager) SaveSetupKey(accountID string, keyToSave *Setup
 		for _, g := range removedGroups {
 			group := account.GetGroup(g)
 			if group != nil {
-				am.storeEvent(userID, oldKey.Id, accountID, activity.GroupRemovedFromSetupKey,
+				am.StoreEvent(userID, oldKey.Id, accountID, activity.GroupRemovedFromSetupKey,
 					map[string]any{"group": group.Name, "group_id": group.ID, "setupkey": newKey.Name})
 			} else {
 				log.Errorf("group %s not found while saving setup key activity event of account %s", g, account.Id)
@@ -305,7 +312,7 @@ func (am *DefaultAccountManager) SaveSetupKey(accountID string, keyToSave *Setup
 		for _, g := range addedGroups {
 			group := account.GetGroup(g)
 			if group != nil {
-				am.storeEvent(userID, oldKey.Id, accountID, activity.GroupAddedToSetupKey,
+				am.StoreEvent(userID, oldKey.Id, accountID, activity.GroupAddedToSetupKey,
 					map[string]any{"group": group.Name, "group_id": group.ID, "setupkey": newKey.Name})
 			} else {
 				log.Errorf("group %s not found while saving setup key activity event of account %s", g, account.Id)
@@ -313,7 +320,9 @@ func (am *DefaultAccountManager) SaveSetupKey(accountID string, keyToSave *Setup
 		}
 	}()
 
-	return newKey, am.updateAccountPeers(account)
+	am.updateAccountPeers(account)
+
+	return newKey, nil
 }
 
 // ListSetupKeys returns a list of all setup keys of the account
@@ -333,7 +342,7 @@ func (am *DefaultAccountManager) ListSetupKeys(accountID, userID string) ([]*Set
 	keys := make([]*SetupKey, 0, len(account.SetupKeys))
 	for _, key := range account.SetupKeys {
 		var k *SetupKey
-		if !user.IsAdmin() {
+		if !(user.HasAdminPower() || user.IsServiceUser) {
 			k = key.HiddenCopy(999)
 		} else {
 			k = key.Copy()
@@ -375,7 +384,7 @@ func (am *DefaultAccountManager) GetSetupKey(accountID, userID, keyID string) (*
 		foundKey.UpdatedAt = foundKey.CreatedAt
 	}
 
-	if !user.IsAdmin() {
+	if !(user.HasAdminPower() || user.IsServiceUser) {
 		foundKey = foundKey.HiddenCopy(999)
 	}
 

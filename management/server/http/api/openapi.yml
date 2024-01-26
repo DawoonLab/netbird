@@ -54,9 +54,36 @@ components:
           description: Period of time after which peer login expires (seconds).
           type: integer
           example: 43200
+        groups_propagation_enabled:
+          description: Allows propagate the new user auto groups to peers that belongs to the user
+          type: boolean
+          example: true
+        jwt_groups_enabled:
+          description: Allows extract groups from JWT claim and add it to account groups.
+          type: boolean
+          example: true
+        jwt_groups_claim_name:
+          description: Name of the claim from which we extract groups names to add it to account groups.
+          type: string
+          example: "roles"
+        jwt_allow_groups:
+          description: List of groups to which users are allowed access
+          type: array
+          items:
+            type: string
+            example: Administrators
+        extra:
+          $ref: '#/components/schemas/AccountExtraSettings'
       required:
         - peer_login_expiration_enabled
         - peer_login_expiration
+    AccountExtraSettings:
+      type: object
+      properties:
+        peer_approval_enabled:
+          description: (Cloud only) Enables or disables peer approval globally. If enabled, all peers added will be in pending state until approved by an admin.
+          type: boolean
+          example: true
     AccountRequest:
       type: object
       properties:
@@ -88,12 +115,17 @@ components:
           type: string
           enum: [ "active","invited","blocked" ]
           example: active
+        last_login:
+          description: Last time this user performed a login to the dashboard
+          type: string
+          format: date-time
+          example: 2023-05-05T09:00:35.477782Z
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_current:
           description: Is true if authenticated user is the same as this user
           type: boolean
@@ -108,6 +140,10 @@ components:
           description: Is true if this user is blocked. Blocked users can't use the system
           type: boolean
           example: false
+        issued:
+          description: How user was issued by API or Integration
+          type: string
+          example: api
       required:
         - id
         - email
@@ -124,11 +160,11 @@ components:
           type: string
           example: admin
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_blocked:
           description: If set to true then user is blocked and can't use the system
           type: boolean
@@ -153,11 +189,11 @@ components:
           type: string
           example: admin
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_service_user:
           description: Is true if this user is a service user
           type: boolean
@@ -192,11 +228,15 @@ components:
         login_expiration_enabled:
           type: boolean
           example: false
+        approval_required:
+          description: (Cloud only) Indicates whether peer needs approval
+          type: boolean
+          example: true
       required:
         - name
         - ssh_enabled
         - login_expiration_enabled
-    Peer:
+    PeerBase:
       allOf:
         - $ref: '#/components/schemas/PeerMinimum'
         - type: object
@@ -260,6 +300,10 @@ components:
               type: string
               format: date-time
               example: 2023-05-05T09:00:35.477782Z
+            approval_required:
+              description: (Cloud only) Indicates whether peer needs approval
+              type: boolean
+              example: true
           required:
             - ip
             - connected
@@ -273,6 +317,50 @@ components:
             - login_expiration_enabled
             - login_expired
             - last_login
+    AccessiblePeer:
+      allOf:
+        - $ref: '#/components/schemas/PeerMinimum'
+        - type: object
+          properties:
+            ip:
+              description: Peer's IP address
+              type: string
+              example: 10.64.0.1
+            dns_label:
+              description: Peer's DNS label is the parsed peer name for domain resolution. It is used to form an FQDN by appending the account's domain to the peer label. e.g. peer-dns-label.netbird.cloud
+              type: string
+              example: stage-host-1.netbird.cloud
+            user_id:
+              description: User ID of the user that enrolled this peer
+              type: string
+              example: google-oauth2|277474792786460067937
+          required:
+            - ip
+            - dns_label
+            - user_id
+    Peer:
+      allOf:
+        - $ref: '#/components/schemas/PeerBase'
+        - type: object
+          properties:
+            accessible_peers:
+              description: List of accessible peers
+              type: array
+              items:
+                $ref: '#/components/schemas/AccessiblePeer'
+          required:
+            - accessible_peers
+    PeerBatch:
+      allOf:
+        - $ref: '#/components/schemas/PeerBase'
+        - type: object
+          properties:
+            accessible_peers_count:
+              description: Number of accessible peers
+              type: integer
+              example: 5
+          required:
+            - accessible_peers_count
     SetupKey:
       type: object
       properties:
@@ -319,11 +407,11 @@ components:
           type: string
           example: valid
         auto_groups:
-          description: Setup key groups to auto-assign to peers registered with this key
+          description: List of group IDs to auto-assign to peers registered with this key
           type: array
           items:
             type: string
-            example: "devs"
+            example: "ch8i4ug6lnn4g9hqv7m0"
         updated_at:
           description: Setup key last update date
           type: string
@@ -333,6 +421,10 @@ components:
           description: A number of times this key can be used. The value of 0 indicates the unlimited usage.
           type: integer
           example: 0
+        ephemeral:
+          description: Indicate that the peer will be ephemeral or not
+          type: boolean
+          example: true
       required:
         - id
         - key
@@ -347,6 +439,7 @@ components:
         - auto_groups
         - updated_at
         - usage_limit
+        - ephemeral
     SetupKeyRequest:
       type: object
       properties:
@@ -361,21 +454,27 @@ components:
         expires_in:
           description: Expiration time in seconds
           type: integer
-          example: 43200
+          minimum: 86400
+          maximum: 31536000
+          example: 86400
         revoked:
           description: Setup key revocation status
           type: boolean
           example: false
         auto_groups:
-          description: Setup key groups to auto-assign to peers registered with this key
+          description: List of group IDs to auto-assign to peers registered with this key
           type: array
           items:
             type: string
-            example: "devs"
+            example: "ch8i4ug6lnn4g9hqv7m0"
         usage_limit:
           description: A number of times this key can be used. The value of 0 indicates the unlimited usage.
           type: integer
           example: 0
+        ephemeral:
+          description: Indicate that the peer will be ephemeral or not
+          type: boolean
+          example: true
       required:
         - name
         - type
@@ -462,6 +561,10 @@ components:
           description: Count of peers associated to the group
           type: integer
           example: 2
+        issued:
+          description: How group was issued by API or from JWT token
+          type: string
+          example: api
       required:
         - id
         - name
@@ -524,13 +627,13 @@ components:
           properties:
             sources:
               type: array
-              description: List of source groups
+              description: List of source group IDs
               items:
                 type: string
                 example: "ch8i4ug6lnn4g9hqv7m1"
             destinations:
               type: array
-              description: List of destination groups
+              description: List of destination group IDs
               items:
                 type: string
                 example: "ch8i4ug6lnn4g9hqv7m0"
@@ -548,12 +651,12 @@ components:
         - type: object
           properties:
             sources:
-              description: Rule source groups
+              description: Rule source group IDs
               type: array
               items:
                 $ref: '#/components/schemas/GroupMinimum'
             destinations:
-              description: Rule destination groups
+              description: Rule destination group IDs
               type: array
               items:
                 $ref: '#/components/schemas/GroupMinimum'
@@ -611,13 +714,13 @@ components:
         - type: object
           properties:
             sources:
-              description: Policy rule source groups
+              description: Policy rule source group IDs
               type: array
               items:
                 type: string
                 example: "ch8i4ug6lnn4g9hqv797"
             destinations:
-              description: Policy rule destination groups
+              description: Policy rule destination group IDs
               type: array
               items:
                 type: string
@@ -631,12 +734,12 @@ components:
         - type: object
           properties:
             sources:
-              description: Policy rule source groups
+              description: Policy rule source group IDs
               type: array
               items:
                 $ref: '#/components/schemas/GroupMinimum'
             destinations:
-              description: Policy rule destination groups
+              description: Policy rule destination group IDs
               type: array
               items:
                 $ref: '#/components/schemas/GroupMinimum'
@@ -713,9 +816,15 @@ components:
           type: boolean
           example: true
         peer:
-          description: Peer Identifier associated with route
+          description: Peer Identifier associated with route. This property can not be set together with `peer_groups`
           type: string
           example: chacbco6lnnbn6cg5s91
+        peer_groups:
+          description: Peers Group Identifier associated with route. This property can not be set together with `peer`
+          type: array
+          items:
+            type: string
+            example: chacbco6lnnbn6cg5s91
         network:
           description: Network range in CIDR format
           type: string
@@ -731,7 +840,7 @@ components:
           type: boolean
           example: true
         groups:
-          description: Route group tag groups
+          description: Group IDs containing routing peers
           type: array
           items:
             type: string
@@ -741,7 +850,9 @@ components:
         - description
         - network_id
         - enabled
-        - peer
+        # Only one property has to be set
+        #- peer
+        #- peer_groups
         - network
         - metric
         - masquerade
@@ -786,17 +897,17 @@ components:
       type: object
       properties:
         name:
-          description: Nameserver group name
+          description: Name of nameserver group name
           type: string
           maxLength: 40
           minLength: 1
           example: Google DNS
         description:
-          description: Nameserver group  description
+          description: Description of the nameserver group
           type: string
           example: Google DNS servers
         nameservers:
-          description: Nameserver group
+          description: Nameserver list
           minLength: 1
           maxLength: 2
           type: array
@@ -807,23 +918,27 @@ components:
           type: boolean
           example: true
         groups:
-          description: Nameserver group tag groups
+          description: Distribution group IDs that defines group of peers that will use this nameserver group
           type: array
           items:
             type: string
             example: ch8i4ug6lnn4g9hqv7m0
         primary:
-          description: Nameserver group primary status
+          description: Defines if a nameserver group is primary that resolves all domains. It should be true only if domains list is empty.
           type: boolean
           example: true
         domains:
-          description: Nameserver group domain list
+          description: Match domain list. It should be empty only if primary is true.
           type: array
           items:
             type: string
             minLength: 1
             maxLength: 255
             example: "example.com"
+        search_domains_enabled:
+          description: Search domain status for match domains. It should be true only if domains list is not empty.
+          type: boolean
+          example: true
       required:
         - name
         - description
@@ -832,6 +947,7 @@ components:
         - groups
         - primary
         - domains
+        - search_domains_enabled
     NameserverGroup:
       allOf:
         - type: object
@@ -874,7 +990,7 @@ components:
           description: The string code of the activity that occurred during the event
           type: string
           enum: [ "user.peer.delete", "user.join", "user.invite", "user.peer.add", "user.group.add", "user.group.delete",
-                  "user.role.update", "user.block", "user.unblock",
+                  "user.role.update", "user.block", "user.unblock", "user.peer.login",
                   "setupkey.peer.add", "setupkey.add", "setupkey.update", "setupkey.revoke", "setupkey.overuse",
                   "setupkey.group.delete", "setupkey.group.add",
                   "rule.add", "rule.delete", "rule.update",
@@ -883,13 +999,21 @@ components:
                   "account.create", "account.setting.peer.login.expiration.update", "account.setting.peer.login.expiration.disable", "account.setting.peer.login.expiration.enable",
                   "route.add", "route.delete", "route.update",
                   "nameserver.group.add", "nameserver.group.delete", "nameserver.group.update",
-                  "peer.ssh.disable", "peer.ssh.enable", "peer.rename", "peer.login.expiration.disable", "peer.login.expiration.enable",
+                  "peer.ssh.disable", "peer.ssh.enable", "peer.rename", "peer.login.expiration.disable", "peer.login.expiration.enable", "peer.login.expire",
                   "service.user.create", "personal.access.token.create", "service.user.delete", "personal.access.token.delete" ]
           example: route.add
         initiator_id:
           description: The ID of the initiator of the event. E.g., an ID of a user that triggered the event.
           type: string
           example: google-oauth2|123456789012345678901
+        initiator_name:
+          description: The name of the initiator of the event.
+          type: string
+          example: John Doe
+        initiator_email:
+          description: The e-mail address of the initiator of the event. E.g., an e-mail of a user that triggered the event.
+          type: string
+          example: demo@netbird.io
         target_id:
           description: The ID of the target of the event. E.g., an ID of the peer that a user removed.
           type: string
@@ -906,6 +1030,8 @@ components:
         - activity
         - activity_code
         - initiator_id
+        - initiator_name
+        - initiator_email
         - target_id
         - meta
   responses:
@@ -971,6 +1097,32 @@ paths:
         '500':
           "$ref": "#/components/responses/internal_error"
   /api/accounts/{accountId}:
+    delete:
+      summary: Delete an Account
+      description: Deletes an account and all its resources. Only administrators and account owners can delete accounts.
+      tags: [ Accounts ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of an account
+      responses:
+        '200':
+          description: Delete account status code
+          content: { }
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
     put:
       summary: Update an Account
       description: Update information about an account
@@ -1102,8 +1254,8 @@ paths:
         '500':
           "$ref": "#/components/responses/internal_error"
     delete:
-      summary: Block a User
-      description: This method blocks a user from accessing the system, but leaves the IDP user intact.
+      summary: Delete a User
+      description: This method removes a user from accessing the system. For this leaves the IDP user intact unless the `--user-delete-from-idp` is passed to management startup.
       tags: [ Users ]
       security:
         - BearerAuth: [ ]
@@ -1262,6 +1414,33 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
+  /api/users/{userId}/invite:
+    post:
+      summary: Resend user invitation
+      description: Resend user invitation
+      tags: [ Users ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a user
+      responses:
+        '200':
+          description: Invite status code
+          content: {}
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
   /api/peers:
     get:
       summary: List all Peers
@@ -1278,7 +1457,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/Peer'
+                  $ref: '#/components/schemas/PeerBatch'
         '400':
           "$ref": "#/components/responses/bad_request"
         '401':
@@ -1643,8 +1822,9 @@ paths:
   /api/rules:
     get:
       summary: List all Rules
-      description: Returns a list of all rules
+      description: Returns a list of all rules. This will be deprecated in favour of `/api/policies`.
       tags: [ Rules ]
+      deprecated: true
       security:
         - BearerAuth: [ ]
         - TokenAuth: [ ]
@@ -1667,7 +1847,8 @@ paths:
           "$ref": "#/components/responses/internal_error"
     post:
       summary: Create a Rule
-      description: Creates a rule
+      description: Creates a rule. This will be deprecated in favour of `/api/policies`.
+      deprecated: true
       tags: [ Rules ]
       security:
         - BearerAuth: [ ]
@@ -1688,7 +1869,8 @@ paths:
   /api/rules/{ruleId}:
     get:
       summary: Retrieve a Rule
-      description: Get information about a rules
+      description: Get information about a rules. This will be deprecated in favour of `/api/policies/{policyID}`.
+      deprecated: true
       tags: [ Rules ]
       security:
         - BearerAuth: [ ]
@@ -1717,7 +1899,8 @@ paths:
           "$ref": "#/components/responses/internal_error"
     put:
       summary: Update a Rule
-      description: Update/Replace a rule
+      description: Update/Replace a rule. This will be deprecated in favour of `/api/policies/{policyID}`.
+      deprecated: true
       tags: [ Rules ]
       security:
         - BearerAuth: [ ]
@@ -1752,7 +1935,8 @@ paths:
           "$ref": "#/components/responses/internal_error"
     delete:
       summary: Delete a Rule
-      description: Delete a rule
+      description: Delete a rule. This will be deprecated in favour of `/api/policies/{policyID}`.
+      deprecated: true
       tags: [ Rules ]
       security:
         - BearerAuth: [ ]

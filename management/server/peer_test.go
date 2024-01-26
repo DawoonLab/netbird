@@ -8,6 +8,8 @@ import (
 
 	"github.com/rs/xid"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 )
 
 func TestPeer_LoginExpired(t *testing.T) {
@@ -52,7 +54,7 @@ func TestPeer_LoginExpired(t *testing.T) {
 
 	for _, c := range tt {
 		t.Run(c.name, func(t *testing.T) {
-			peer := &Peer{
+			peer := &nbpeer.Peer{
 				LoginExpirationEnabled: c.expirationEnabled,
 				LastLogin:              c.lastLogin,
 				UserID:                 userID,
@@ -78,11 +80,10 @@ func TestAccountManager_GetNetworkMap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var setupKey *SetupKey
-	for _, key := range account.SetupKeys {
-		if key.Type == SetupKeyReusable {
-			setupKey = key
-		}
+	setupKey, err := manager.CreateSetupKey(account.Id, "test-key", SetupKeyReusable, time.Hour, nil, 999, userId, false)
+	if err != nil {
+		t.Fatal("error creating setup key")
+		return
 	}
 
 	peerKey1, err := wgtypes.GeneratePrivateKey()
@@ -91,9 +92,9 @@ func TestAccountManager_GetNetworkMap(t *testing.T) {
 		return
 	}
 
-	peer1, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, _, err := manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey1.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-1"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-1"},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -105,9 +106,9 @@ func TestAccountManager_GetNetworkMap(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	_, _, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	_, _, err = manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey2.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-2"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-2"},
 	})
 
 	if err != nil {
@@ -164,9 +165,9 @@ func TestAccountManager_GetNetworkMapWithPolicy(t *testing.T) {
 		return
 	}
 
-	peer1, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, _, err := manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey1.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-1"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-1"},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -178,9 +179,9 @@ func TestAccountManager_GetNetworkMapWithPolicy(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	peer2, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer2, _, err := manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey2.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-2"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-2"},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -328,7 +329,11 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	setupKey := getSetupKey(account, SetupKeyReusable)
+	setupKey, err := manager.CreateSetupKey(account.Id, "test-key", SetupKeyReusable, time.Hour, nil, 999, userId, false)
+	if err != nil {
+		t.Fatal("error creating setup key")
+		return
+	}
 
 	peerKey1, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -336,9 +341,9 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		return
 	}
 
-	peer1, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer1, _, err := manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey1.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-1"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-1"},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -350,9 +355,9 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	_, _, err = manager.AddPeer(setupKey.Key, "", &Peer{
+	_, _, err = manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey2.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-2"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-2"},
 	})
 
 	if err != nil {
@@ -366,8 +371,8 @@ func TestAccountManager_GetPeerNetwork(t *testing.T) {
 		return
 	}
 
-	if account.Network.Id != network.Id {
-		t.Errorf("expecting Account Networks ID to be equal, got %s expected %s", network.Id, account.Network.Id)
+	if account.Network.Identifier != network.Identifier {
+		t.Errorf("expecting Account Networks ID to be equal, got %s expected %s", network.Identifier, account.Network.Identifier)
 	}
 }
 
@@ -394,16 +399,21 @@ func TestDefaultAccountManager_GetPeer(t *testing.T) {
 	}
 
 	// two peers one added by a regular user and one with a setup key
-	setupKey := getSetupKey(account, SetupKeyReusable)
+	setupKey, err := manager.CreateSetupKey(account.Id, "test-key", SetupKeyReusable, time.Hour, nil, 999, adminUser, false)
+	if err != nil {
+		t.Fatal("error creating setup key")
+		return
+	}
+
 	peerKey1, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		t.Fatal(err)
 		return
 	}
 
-	peer1, _, err := manager.AddPeer("", someUser, &Peer{
+	peer1, _, err := manager.AddPeer("", someUser, &nbpeer.Peer{
 		Key:  peerKey1.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-2"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-2"},
 	})
 	if err != nil {
 		t.Errorf("expecting peer to be added, got failure %v", err)
@@ -417,9 +427,9 @@ func TestDefaultAccountManager_GetPeer(t *testing.T) {
 	}
 
 	// the second peer added with a setup key
-	peer2, _, err := manager.AddPeer(setupKey.Key, "", &Peer{
+	peer2, _, err := manager.AddPeer(setupKey.Key, "", &nbpeer.Peer{
 		Key:  peerKey2.PublicKey().String(),
-		Meta: PeerSystemMeta{Hostname: "test-peer-2"},
+		Meta: nbpeer.PeerSystemMeta{Hostname: "test-peer-2"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -469,14 +479,4 @@ func TestDefaultAccountManager_GetPeer(t *testing.T) {
 		return
 	}
 	assert.NotNil(t, peer)
-}
-
-func getSetupKey(account *Account, keyType SetupKeyType) *SetupKey {
-	var setupKey *SetupKey
-	for _, key := range account.SetupKeys {
-		if key.Type == keyType {
-			setupKey = key
-		}
-	}
-	return setupKey
 }

@@ -22,6 +22,7 @@ import (
 )
 
 func startTestingServices(t *testing.T) string {
+	t.Helper()
 	config := &mgmt.Config{}
 	_, err := util.ReadJson("../testdata/management.json", config)
 	if err != nil {
@@ -44,6 +45,7 @@ func startTestingServices(t *testing.T) string {
 }
 
 func startSignal(t *testing.T) (*grpc.Server, net.Listener) {
+	t.Helper()
 	lis, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -60,28 +62,29 @@ func startSignal(t *testing.T) (*grpc.Server, net.Listener) {
 }
 
 func startManagement(t *testing.T, config *mgmt.Config) (*grpc.Server, net.Listener) {
+	t.Helper()
 	lis, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := grpc.NewServer()
-	store, err := mgmt.NewFileStore(config.Datadir, nil)
+	store, err := mgmt.NewStoreFromJson(config.Datadir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	peersUpdateManager := mgmt.NewPeersUpdateManager()
+	peersUpdateManager := mgmt.NewPeersUpdateManager(nil)
 	eventStore := &activity.InMemoryEventStore{}
 	if err != nil {
 		return nil, nil
 	}
 	accountManager, err := mgmt.BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore)
+		eventStore, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	turnManager := mgmt.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := mgmt.NewServer(config, accountManager, peersUpdateManager, turnManager, nil)
+	mgmtServer, err := mgmt.NewServer(config, accountManager, peersUpdateManager, turnManager, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +101,7 @@ func startManagement(t *testing.T, config *mgmt.Config) (*grpc.Server, net.Liste
 func startClientDaemon(
 	t *testing.T, ctx context.Context, managementURL, configPath string,
 ) (*grpc.Server, net.Listener) {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

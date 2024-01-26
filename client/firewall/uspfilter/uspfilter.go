@@ -10,24 +10,33 @@ import (
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 
-	fw "github.com/netbirdio/netbird/client/firewall"
+	firewall "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/iface"
 )
 
 const layerTypeAll = 0
 
+var (
+	errRouteNotSupported = fmt.Errorf("route not supported with userspace firewall")
+)
+
 // IFaceMapper defines subset methods of interface required for manager
 type IFaceMapper interface {
 	SetFilter(iface.PacketFilter) error
+	Address() iface.WGAddress
 }
+
+// RuleSet is a set of rules grouped by a string key
+type RuleSet map[string]Rule
 
 // Manager userspace firewall manager
 type Manager struct {
-	outgoingRules []Rule
-	incomingRules []Rule
-	rulesIndex    map[string]int
-	wgNetwork     *net.IPNet
-	decoders      sync.Pool
+	outgoingRules  map[string]RuleSet
+	incomingRules  map[string]RuleSet
+	wgNetwork      *net.IPNet
+	decoders       sync.Pool
+	wgIface        IFaceMapper
+	nativeFirewall firewall.Manager
 
 	mutex sync.RWMutex
 }
@@ -47,8 +56,21 @@ type decoder struct {
 
 // Create userspace firewall manager constructor
 func Create(iface IFaceMapper) (*Manager, error) {
+	return create(iface)
+}
+
+func CreateWithNativeFirewall(iface IFaceMapper, nativeFirewall firewall.Manager) (*Manager, error) {
+	mgr, err := create(iface)
+	if err != nil {
+		return nil, err
+	}
+
+	mgr.nativeFirewall = nativeFirewall
+	return mgr, nil
+}
+
+func create(iface IFaceMapper) (*Manager, error) {
 	m := &Manager{
-		rulesIndex: make(map[string]int),
 		decoders: sync.Pool{
 			New: func() any {
 				d := &decoder{
@@ -62,6 +84,9 @@ func Create(iface IFaceMapper) (*Manager, error) {
 				return d
 			},
 		},
+		outgoingRules: make(map[string]RuleSet),
+		incomingRules: make(map[string]RuleSet),
+		wgIface:       iface,
 	}
 
 	if err := iface.SetFilter(m); err != nil {
@@ -70,26 +95,50 @@ func Create(iface IFaceMapper) (*Manager, error) {
 	return m, nil
 }
 
+func (m *Manager) IsServerRouteSupported() bool {
+	if m.nativeFirewall == nil {
+		return false
+	} else {
+		return true
+	}
+}
+
+func (m *Manager) InsertRoutingRules(pair firewall.RouterPair) error {
+	if m.nativeFirewall == nil {
+		return errRouteNotSupported
+	}
+	return m.nativeFirewall.InsertRoutingRules(pair)
+}
+
+// RemoveRoutingRules removes a routing firewall rule
+func (m *Manager) RemoveRoutingRules(pair firewall.RouterPair) error {
+	if m.nativeFirewall == nil {
+		return errRouteNotSupported
+	}
+	return m.nativeFirewall.RemoveRoutingRules(pair)
+}
+
 // AddFiltering rule to the firewall
 //
 // If comment argument is empty firewall manager should set
 // rule ID as comment for the rule
 func (m *Manager) AddFiltering(
 	ip net.IP,
-	proto fw.Protocol,
-	sPort *fw.Port,
-	dPort *fw.Port,
-	direction fw.RuleDirection,
-	action fw.Action,
+	proto firewall.Protocol,
+	sPort *firewall.Port,
+	dPort *firewall.Port,
+	direction firewall.RuleDirection,
+	action firewall.Action,
+	ipsetName string,
 	comment string,
-) (fw.Rule, error) {
+) ([]firewall.Rule, error) {
 	r := Rule{
 		id:        uuid.New().String(),
 		ip:        ip,
 		ipLayer:   layers.LayerTypeIPv6,
 		matchByIP: true,
 		direction: direction,
-		drop:      action == fw.ActionDrop,
+		drop:      action == firewall.ActionDrop,
 		comment:   comment,
 	}
 	if ipNormalized := ip.To4(); ipNormalized != nil {
@@ -110,36 +159,37 @@ func (m *Manager) AddFiltering(
 	}
 
 	switch proto {
-	case fw.ProtocolTCP:
+	case firewall.ProtocolTCP:
 		r.protoLayer = layers.LayerTypeTCP
-	case fw.ProtocolUDP:
+	case firewall.ProtocolUDP:
 		r.protoLayer = layers.LayerTypeUDP
-	case fw.ProtocolICMP:
+	case firewall.ProtocolICMP:
 		r.protoLayer = layers.LayerTypeICMPv4
 		if r.ipLayer == layers.LayerTypeIPv6 {
 			r.protoLayer = layers.LayerTypeICMPv6
 		}
-	case fw.ProtocolALL:
+	case firewall.ProtocolALL:
 		r.protoLayer = layerTypeAll
 	}
 
 	m.mutex.Lock()
-	var p int
-	if direction == fw.RuleDirectionIN {
-		m.incomingRules = append(m.incomingRules, r)
-		p = len(m.incomingRules) - 1
+	if direction == firewall.RuleDirectionIN {
+		if _, ok := m.incomingRules[r.ip.String()]; !ok {
+			m.incomingRules[r.ip.String()] = make(RuleSet)
+		}
+		m.incomingRules[r.ip.String()][r.id] = r
 	} else {
-		m.outgoingRules = append(m.outgoingRules, r)
-		p = len(m.outgoingRules) - 1
+		if _, ok := m.outgoingRules[r.ip.String()]; !ok {
+			m.outgoingRules[r.ip.String()] = make(RuleSet)
+		}
+		m.outgoingRules[r.ip.String()][r.id] = r
 	}
-	m.rulesIndex[r.id] = p
 	m.mutex.Unlock()
-
-	return &r, nil
+	return []firewall.Rule{&r}, nil
 }
 
 // DeleteRule from the firewall by rule definition
-func (m *Manager) DeleteRule(rule fw.Rule) error {
+func (m *Manager) DeleteRule(rule firewall.Rule) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -148,38 +198,25 @@ func (m *Manager) DeleteRule(rule fw.Rule) error {
 		return fmt.Errorf("delete rule: invalid rule type: %T", rule)
 	}
 
-	p, ok := m.rulesIndex[r.id]
-	if !ok {
-		return fmt.Errorf("delete rule: no rule with such id: %v", r.id)
-	}
-	delete(m.rulesIndex, r.id)
-
-	var toUpdate []Rule
-	if r.direction == fw.RuleDirectionIN {
-		m.incomingRules = append(m.incomingRules[:p], m.incomingRules[p+1:]...)
-		toUpdate = m.incomingRules
+	if r.direction == firewall.RuleDirectionIN {
+		_, ok := m.incomingRules[r.ip.String()][r.id]
+		if !ok {
+			return fmt.Errorf("delete rule: no rule with such id: %v", r.id)
+		}
+		delete(m.incomingRules[r.ip.String()], r.id)
 	} else {
-		m.outgoingRules = append(m.outgoingRules[:p], m.outgoingRules[p+1:]...)
-		toUpdate = m.outgoingRules
+		_, ok := m.outgoingRules[r.ip.String()][r.id]
+		if !ok {
+			return fmt.Errorf("delete rule: no rule with such id: %v", r.id)
+		}
+		delete(m.outgoingRules[r.ip.String()], r.id)
 	}
 
-	for i := 0; i < len(toUpdate); i++ {
-		m.rulesIndex[toUpdate[i].id] = i
-	}
 	return nil
 }
 
-// Reset firewall to the default state
-func (m *Manager) Reset() error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.outgoingRules = m.outgoingRules[:0]
-	m.incomingRules = m.incomingRules[:0]
-	m.rulesIndex = make(map[string]int)
-
-	return nil
-}
+// Flush doesn't need to be implemented for this manager
+func (m *Manager) Flush() error { return nil }
 
 // DropOutgoing filter outgoing packets
 func (m *Manager) DropOutgoing(packetData []byte) bool {
@@ -191,8 +228,8 @@ func (m *Manager) DropIncoming(packetData []byte) bool {
 	return m.dropFilter(packetData, m.incomingRules, true)
 }
 
-// dropFilter imlements same logic for booth direction of the traffic
-func (m *Manager) dropFilter(packetData []byte, rules []Rule, isIncomingPacket bool) bool {
+// dropFilter implements same logic for booth direction of the traffic
+func (m *Manager) dropFilter(packetData []byte, rules map[string]RuleSet, isIncomingPacket bool) bool {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
@@ -224,37 +261,49 @@ func (m *Manager) dropFilter(packetData []byte, rules []Rule, isIncomingPacket b
 		log.Errorf("unknown layer: %v", d.decoded[0])
 		return true
 	}
-	payloadLayer := d.decoded[1]
 
-	// check if IP address match by IP
+	var ip net.IP
+	switch ipLayer {
+	case layers.LayerTypeIPv4:
+		if isIncomingPacket {
+			ip = d.ip4.SrcIP
+		} else {
+			ip = d.ip4.DstIP
+		}
+	case layers.LayerTypeIPv6:
+		if isIncomingPacket {
+			ip = d.ip6.SrcIP
+		} else {
+			ip = d.ip6.DstIP
+		}
+	}
+
+	filter, ok := validateRule(ip, packetData, rules[ip.String()], d)
+	if ok {
+		return filter
+	}
+	filter, ok = validateRule(ip, packetData, rules["0.0.0.0"], d)
+	if ok {
+		return filter
+	}
+	filter, ok = validateRule(ip, packetData, rules["::"], d)
+	if ok {
+		return filter
+	}
+
+	// default policy is DROP ALL
+	return true
+}
+
+func validateRule(ip net.IP, packetData []byte, rules map[string]Rule, d *decoder) (bool, bool) {
+	payloadLayer := d.decoded[1]
 	for _, rule := range rules {
-		if rule.matchByIP {
-			switch ipLayer {
-			case layers.LayerTypeIPv4:
-				if isIncomingPacket {
-					if !d.ip4.SrcIP.Equal(rule.ip) {
-						continue
-					}
-				} else {
-					if !d.ip4.DstIP.Equal(rule.ip) {
-						continue
-					}
-				}
-			case layers.LayerTypeIPv6:
-				if isIncomingPacket {
-					if !d.ip6.SrcIP.Equal(rule.ip) {
-						continue
-					}
-				} else {
-					if !d.ip6.DstIP.Equal(rule.ip) {
-						continue
-					}
-				}
-			}
+		if rule.matchByIP && !ip.Equal(rule.ip) {
+			continue
 		}
 
 		if rule.protoLayer == layerTypeAll {
-			return rule.drop
+			return rule.drop, true
 		}
 
 		if payloadLayer != rule.protoLayer {
@@ -264,38 +313,36 @@ func (m *Manager) dropFilter(packetData []byte, rules []Rule, isIncomingPacket b
 		switch payloadLayer {
 		case layers.LayerTypeTCP:
 			if rule.sPort == 0 && rule.dPort == 0 {
-				return rule.drop
+				return rule.drop, true
 			}
 			if rule.sPort != 0 && rule.sPort == uint16(d.tcp.SrcPort) {
-				return rule.drop
+				return rule.drop, true
 			}
 			if rule.dPort != 0 && rule.dPort == uint16(d.tcp.DstPort) {
-				return rule.drop
+				return rule.drop, true
 			}
 		case layers.LayerTypeUDP:
 			// if rule has UDP hook (and if we are here we match this rule)
 			// we ignore rule.drop and call this hook
 			if rule.udpHook != nil {
-				return rule.udpHook(packetData)
+				return rule.udpHook(packetData), true
 			}
 
 			if rule.sPort == 0 && rule.dPort == 0 {
-				return rule.drop
+				return rule.drop, true
 			}
 			if rule.sPort != 0 && rule.sPort == uint16(d.udp.SrcPort) {
-				return rule.drop
+				return rule.drop, true
 			}
 			if rule.dPort != 0 && rule.dPort == uint16(d.udp.DstPort) {
-				return rule.drop
+				return rule.drop, true
 			}
-			return rule.drop
+			return rule.drop, true
 		case layers.LayerTypeICMPv4, layers.LayerTypeICMPv6:
-			return rule.drop
+			return rule.drop, true
 		}
 	}
-
-	// default policy is DROP ALL
-	return true
+	return false, false
 }
 
 // SetNetwork of the wireguard interface to which filtering applied
@@ -315,7 +362,7 @@ func (m *Manager) AddUDPPacketHook(
 		protoLayer: layers.LayerTypeUDP,
 		dPort:      dPort,
 		ipLayer:    layers.LayerTypeIPv6,
-		direction:  fw.RuleDirectionOUT,
+		direction:  firewall.RuleDirectionOUT,
 		comment:    fmt.Sprintf("UDP Hook direction: %v, ip:%v, dport:%d", in, ip, dPort),
 		udpHook:    hook,
 	}
@@ -325,19 +372,19 @@ func (m *Manager) AddUDPPacketHook(
 	}
 
 	m.mutex.Lock()
-	var toUpdate []Rule
 	if in {
-		r.direction = fw.RuleDirectionIN
-		m.incomingRules = append([]Rule{r}, m.incomingRules...)
-		toUpdate = m.incomingRules
+		r.direction = firewall.RuleDirectionIN
+		if _, ok := m.incomingRules[r.ip.String()]; !ok {
+			m.incomingRules[r.ip.String()] = make(map[string]Rule)
+		}
+		m.incomingRules[r.ip.String()][r.id] = r
 	} else {
-		m.outgoingRules = append([]Rule{r}, m.outgoingRules...)
-		toUpdate = m.outgoingRules
+		if _, ok := m.outgoingRules[r.ip.String()]; !ok {
+			m.outgoingRules[r.ip.String()] = make(map[string]Rule)
+		}
+		m.outgoingRules[r.ip.String()][r.id] = r
 	}
 
-	for i := range toUpdate {
-		m.rulesIndex[toUpdate[i].id] = i
-	}
 	m.mutex.Unlock()
 
 	return r.id
@@ -345,14 +392,20 @@ func (m *Manager) AddUDPPacketHook(
 
 // RemovePacketHook removes packet hook by given ID
 func (m *Manager) RemovePacketHook(hookID string) error {
-	for _, r := range m.incomingRules {
-		if r.id == hookID {
-			return m.DeleteRule(&r)
+	for _, arr := range m.incomingRules {
+		for _, r := range arr {
+			if r.id == hookID {
+				rule := r
+				return m.DeleteRule(&rule)
+			}
 		}
 	}
-	for _, r := range m.outgoingRules {
-		if r.id == hookID {
-			return m.DeleteRule(&r)
+	for _, arr := range m.outgoingRules {
+		for _, r := range arr {
+			if r.id == hookID {
+				rule := r
+				return m.DeleteRule(&rule)
+			}
 		}
 	}
 	return fmt.Errorf("hook with given id not found")

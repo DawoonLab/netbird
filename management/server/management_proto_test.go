@@ -141,11 +141,6 @@ func Test_SyncProtocol(t *testing.T) {
 		return
 	}
 
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
 	sync, err := client.Sync(context.TODO(), &mgmtProto.EncryptedMessage{
 		WgPubKey: key.PublicKey().String(),
 		Body:     message,
@@ -405,24 +400,27 @@ func TestServer_GetDeviceAuthorizationFlow(t *testing.T) {
 }
 
 func startManagement(t *testing.T, config *Config) (*grpc.Server, string, error) {
+	t.Helper()
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return nil, "", err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
-	store, err := NewFileStore(config.Datadir, nil)
+	store, err := NewStoreFromJson(config.Datadir, nil)
 	if err != nil {
 		return nil, "", err
 	}
-	peersUpdateManager := NewPeersUpdateManager()
+	peersUpdateManager := NewPeersUpdateManager(nil)
 	eventStore := &activity.InMemoryEventStore{}
 	accountManager, err := BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore)
+		eventStore, false)
 	if err != nil {
 		return nil, "", err
 	}
 	turnManager := NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := NewServer(config, accountManager, peersUpdateManager, turnManager, nil)
+
+	ephemeralMgr := NewEphemeralManager(store, accountManager)
+	mgmtServer, err := NewServer(config, accountManager, peersUpdateManager, turnManager, nil, ephemeralMgr)
 	if err != nil {
 		return nil, "", err
 	}

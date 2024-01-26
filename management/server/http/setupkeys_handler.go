@@ -60,12 +60,23 @@ func (h *SetupKeysHandler) CreateSetupKey(w http.ResponseWriter, r *http.Request
 
 	expiresIn := time.Duration(req.ExpiresIn) * time.Second
 
+	day := time.Hour * 24
+	year := day * 365
+	if expiresIn < day || expiresIn > year {
+		util.WriteError(status.Errorf(status.InvalidArgument, "expiresIn should be between 1 day and 365 days"), w)
+		return
+	}
+
 	if req.AutoGroups == nil {
 		req.AutoGroups = []string{}
 	}
 
+	var ephemeral bool
+	if req.Ephemeral != nil {
+		ephemeral = *req.Ephemeral
+	}
 	setupKey, err := h.accountManager.CreateSetupKey(account.Id, req.Name, server.SetupKeyType(req.Type), expiresIn,
-		req.AutoGroups, req.UsageLimit, user.Id)
+		req.AutoGroups, req.UsageLimit, user.Id, ephemeral)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -181,13 +192,14 @@ func writeSuccess(w http.ResponseWriter, key *server.SetupKey) {
 
 func toResponseBody(key *server.SetupKey) *api.SetupKey {
 	var state string
-	if key.IsExpired() {
+	switch {
+	case key.IsExpired():
 		state = "expired"
-	} else if key.IsRevoked() {
+	case key.IsRevoked():
 		state = "revoked"
-	} else if key.IsOverUsed() {
+	case key.IsOverUsed():
 		state = "overused"
-	} else {
+	default:
 		state = "valid"
 	}
 
@@ -205,5 +217,6 @@ func toResponseBody(key *server.SetupKey) *api.SetupKey {
 		AutoGroups: key.AutoGroups,
 		UpdatedAt:  key.UpdatedAt,
 		UsageLimit: key.UsageLimit,
+		Ephemeral:  key.Ephemeral,
 	}
 }

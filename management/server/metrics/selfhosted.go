@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -48,6 +47,7 @@ type properties map[string]interface{}
 // DataSource metric data source
 type DataSource interface {
 	GetAllAccounts() []*server.Account
+	GetStoreEngine() server.StoreEngine
 }
 
 // ConnManager peer connection manager that holds state for current active connections
@@ -59,6 +59,7 @@ type ConnManager interface {
 type Worker struct {
 	ctx         context.Context
 	id          string
+	idpManager  string
 	dataSource  DataSource
 	connManager ConnManager
 	startupTime time.Time
@@ -66,11 +67,12 @@ type Worker struct {
 }
 
 // NewWorker returns a metrics worker
-func NewWorker(ctx context.Context, id string, dataSource DataSource, connManager ConnManager) *Worker {
+func NewWorker(ctx context.Context, id string, dataSource DataSource, connManager ConnManager, idpManager string) *Worker {
 	currentTime := time.Now()
 	return &Worker{
 		ctx:         ctx,
 		id:          id,
+		idpManager:  idpManager,
 		dataSource:  dataSource,
 		connManager: connManager,
 		startupTime: currentTime,
@@ -155,28 +157,31 @@ func (w *Worker) generatePayload(apiKey string) pushPayload {
 
 func (w *Worker) generateProperties() properties {
 	var (
-		uptime             float64
-		accounts           int
-		expirationEnabled  int
-		users              int
-		serviceUsers       int
-		pats               int
-		peers              int
-		peersSSHEnabled    int
-		setupKeysUsage     int
-		activePeersLastDay int
-		osPeers            map[string]int
-		userPeers          int
-		rules              int
-		rulesProtocol      map[string]int
-		rulesDirection     map[string]int
-		groups             int
-		routes             int
-		nameservers        int
-		uiClient           int
-		version            string
-		peerActiveVersions []string
-		osUIClients        map[string]int
+		uptime                float64
+		accounts              int
+		expirationEnabled     int
+		users                 int
+		serviceUsers          int
+		pats                  int
+		peers                 int
+		peersSSHEnabled       int
+		setupKeysUsage        int
+		ephemeralPeersSKs     int
+		ephemeralPeersSKUsage int
+		activePeersLastDay    int
+		osPeers               map[string]int
+		userPeers             int
+		rules                 int
+		rulesProtocol         map[string]int
+		rulesDirection        map[string]int
+		groups                int
+		routes                int
+		routesWithRGGroups    int
+		nameservers           int
+		uiClient              int
+		version               string
+		peerActiveVersions    []string
+		osUIClients           map[string]int
 	)
 	start := time.Now()
 	metricsProperties := make(properties)
@@ -195,9 +200,14 @@ func (w *Worker) generateProperties() properties {
 			expirationEnabled++
 		}
 
-		groups = groups + len(account.Groups)
-		routes = routes + len(account.Routes)
-		nameservers = nameservers + len(account.NameServerGroups)
+		groups += len(account.Groups)
+		routes += len(account.Routes)
+		for _, route := range account.Routes {
+			if len(route.PeerGroups) > 0 {
+				routesWithRGGroups++
+			}
+		}
+		nameservers += len(account.NameServerGroups)
 
 		for _, policy := range account.Policies {
 			for _, rule := range policy.Rules {
@@ -221,7 +231,11 @@ func (w *Worker) generateProperties() properties {
 		}
 
 		for _, key := range account.SetupKeys {
-			setupKeysUsage = setupKeysUsage + key.UsedTimes
+			setupKeysUsage += key.UsedTimes
+			if key.Ephemeral {
+				ephemeralPeersSKs++
+				ephemeralPeersSKUsage += key.UsedTimes
+			}
 		}
 
 		for _, peer := range account.Peers {
@@ -267,16 +281,21 @@ func (w *Worker) generateProperties() properties {
 	metricsProperties["peers_ssh_enabled"] = peersSSHEnabled
 	metricsProperties["peers_login_expiration_enabled"] = expirationEnabled
 	metricsProperties["setup_keys_usage"] = setupKeysUsage
+	metricsProperties["ephemeral_peers_setup_keys"] = ephemeralPeersSKs
+	metricsProperties["ephemeral_peers_setup_keys_usage"] = ephemeralPeersSKUsage
 	metricsProperties["active_peers_last_day"] = activePeersLastDay
 	metricsProperties["user_peers"] = userPeers
 	metricsProperties["rules"] = rules
 	metricsProperties["groups"] = groups
 	metricsProperties["routes"] = routes
+	metricsProperties["routes_with_routing_groups"] = routesWithRGGroups
 	metricsProperties["nameservers"] = nameservers
 	metricsProperties["version"] = version
 	metricsProperties["min_active_peer_version"] = minActivePeerVersion
 	metricsProperties["max_active_peer_version"] = maxActivePeerVersion
 	metricsProperties["ui_clients"] = uiClient
+	metricsProperties["idp_manager"] = w.idpManager
+	metricsProperties["store_engine"] = w.dataSource.GetStoreEngine()
 
 	for protocol, count := range rulesProtocol {
 		metricsProperties["rules_protocol_"+protocol] = count
@@ -361,29 +380,28 @@ func createPostRequest(ctx context.Context, endpoint string, payloadStr string) 
 }
 
 func getMinMaxVersion(inputList []string) (string, string) {
-	reg, err := regexp.Compile(version.SemverRegexpRaw)
-	if err != nil {
-		return "", ""
-	}
-
 	versions := make([]*version.Version, 0)
 
 	for _, raw := range inputList {
-		if raw != "" && reg.MatchString(raw) {
+		if raw != "" && nbversion.SemverRegexp.MatchString(raw) {
 			v, err := version.NewVersion(raw)
 			if err == nil {
 				versions = append(versions, v)
 			}
 		}
 	}
-	switch len(versions) {
+
+	targetIndex := 1
+	l := len(versions)
+
+	switch l {
 	case 0:
 		return "", ""
-	case 1:
-		v := versions[0].String()
+	case targetIndex:
+		v := versions[targetIndex-1].String()
 		return v, v
 	default:
 		sort.Sort(version.Collection(versions))
-		return versions[0].String(), versions[len(versions)-1].String()
+		return versions[targetIndex-1].String(), versions[l-1].String()
 	}
 }

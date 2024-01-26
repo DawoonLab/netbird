@@ -28,7 +28,7 @@ import (
 
 // ConnStateNotifier is a wrapper interface of the status recorders
 type ConnStateNotifier interface {
-	MarkManagementDisconnected()
+	MarkManagementDisconnected(error)
 	MarkManagementConnected()
 }
 
@@ -57,7 +57,7 @@ func NewClient(ctx context.Context, addr string, ourPrivateKey wgtypes.Key, tlsE
 		transportOption,
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:    15 * time.Second,
+			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
 		}))
 	if err != nil {
@@ -154,7 +154,7 @@ func (c *GrpcClient) Sync(msgHandler func(msg *proto.SyncResponse) error) error 
 				return nil
 			default:
 				backOff.Reset() // reset backoff counter after successful connection
-				c.notifyDisconnected()
+				c.notifyDisconnected(err)
 				log.Warnf("disconnected from the Management service but will retry silently. Reason: %v", err)
 				return err
 			}
@@ -283,6 +283,32 @@ func (c *GrpcClient) GetServerPublicKey() (*wgtypes.Key, error) {
 	return &serverKey, nil
 }
 
+// IsHealthy probes the gRPC connection and returns false on errors
+func (c *GrpcClient) IsHealthy() bool {
+	switch c.conn.GetState() {
+	case connectivity.TransientFailure:
+		return false
+	case connectivity.Connecting:
+		return true
+	case connectivity.Shutdown:
+		return true
+	case connectivity.Idle:
+	case connectivity.Ready:
+	}
+
+	ctx, cancel := context.WithTimeout(c.ctx, 1*time.Second)
+	defer cancel()
+
+	_, err := c.realClient.GetServerKey(ctx, &proto.Empty{})
+	if err != nil {
+		c.notifyDisconnected(err)
+		log.Warnf("health check returned: %s", err)
+		return false
+	}
+	c.notifyConnected()
+	return true
+}
+
 func (c *GrpcClient) login(serverKey wgtypes.Key, req *proto.LoginRequest) (*proto.LoginResponse, error) {
 	if !c.ready() {
 		return nil, fmt.Errorf("no connection to management")
@@ -366,14 +392,48 @@ func (c *GrpcClient) GetDeviceAuthorizationFlow(serverKey wgtypes.Key) (*proto.D
 	return flowInfoResp, nil
 }
 
-func (c *GrpcClient) notifyDisconnected() {
+// GetPKCEAuthorizationFlow returns a pkce authorization flow information.
+// It also takes care of encrypting and decrypting messages.
+func (c *GrpcClient) GetPKCEAuthorizationFlow(serverKey wgtypes.Key) (*proto.PKCEAuthorizationFlow, error) {
+	if !c.ready() {
+		return nil, fmt.Errorf("no connection to management in order to get pkce authorization flow")
+	}
+	mgmCtx, cancel := context.WithTimeout(c.ctx, time.Second*2)
+	defer cancel()
+
+	message := &proto.PKCEAuthorizationFlowRequest{}
+	encryptedMSG, err := encryption.EncryptMessage(serverKey, c.key, message)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.realClient.GetPKCEAuthorizationFlow(mgmCtx, &proto.EncryptedMessage{
+		WgPubKey: c.key.PublicKey().String(),
+		Body:     encryptedMSG,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	flowInfoResp := &proto.PKCEAuthorizationFlow{}
+	err = encryption.DecryptMessage(serverKey, c.key, resp.Body, flowInfoResp)
+	if err != nil {
+		errWithMSG := fmt.Errorf("failed to decrypt pkce authorization flow message: %s", err)
+		log.Error(errWithMSG)
+		return nil, errWithMSG
+	}
+
+	return flowInfoResp, nil
+}
+
+func (c *GrpcClient) notifyDisconnected(err error) {
 	c.connStateCallbackLock.RLock()
 	defer c.connStateCallbackLock.RUnlock()
 
 	if c.connStateCallback == nil {
 		return
 	}
-	c.connStateCallback.MarkManagementDisconnected()
+	c.connStateCallback.MarkManagementDisconnected(err)
 }
 
 func (c *GrpcClient) notifyConnected() {

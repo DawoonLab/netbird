@@ -1,17 +1,13 @@
 package dns
 
-import (
-	"github.com/netbirdio/netbird/iface"
-)
-
 type androidHostManager struct {
 }
 
-func newHostManager(wgInterface *iface.WGIface) (hostManager, error) {
+func newHostManager(wgInterface WGIface) (hostManager, error) {
 	return &androidHostManager{}, nil
 }
 
-func (a androidHostManager) applyDNSConfig(config hostDNSConfig) error {
+func (a androidHostManager) applyDNSConfig(config HostDNSConfig) error {
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,13 +10,13 @@ import (
 func TestAddPeer(t *testing.T) {
 	key := "abc"
 	status := NewRecorder("https://mgm")
-	err := status.AddPeer(key)
+	err := status.AddPeer(key, "abc.netbird")
 	assert.NoError(t, err, "shouldn't return error")
 
 	_, exists := status.peers[key]
 	assert.True(t, exists, "value was found")
 
-	err = status.AddPeer(key)
+	err = status.AddPeer(key, "abc.netbird")
 
 	assert.Error(t, err, "should return error on duplicate")
 }
@@ -23,7 +24,7 @@ func TestAddPeer(t *testing.T) {
 func TestGetPeer(t *testing.T) {
 	key := "abc"
 	status := NewRecorder("https://mgm")
-	err := status.AddPeer(key)
+	err := status.AddPeer(key, "abc.netbird")
 	assert.NoError(t, err, "shouldn't return error")
 
 	peerStatus, err := status.GetPeer(key)
@@ -152,9 +153,10 @@ func TestUpdateSignalState(t *testing.T) {
 		name      string
 		connected bool
 		want      bool
+		err       error
 	}{
-		{"should mark as connected", true, true},
-		{"should mark as disconnected", false, false},
+		{"should mark as connected", true, true, nil},
+		{"should mark as disconnected", false, false, errors.New("test")},
 	}
 
 	status := NewRecorder("https://mgm")
@@ -165,9 +167,10 @@ func TestUpdateSignalState(t *testing.T) {
 			if test.connected {
 				status.MarkSignalConnected()
 			} else {
-				status.MarkSignalDisconnected()
+				status.MarkSignalDisconnected(test.err)
 			}
 			assert.Equal(t, test.want, status.signalState, "signal status should be equal")
+			assert.Equal(t, test.err, status.signalError)
 		})
 	}
 }
@@ -178,9 +181,10 @@ func TestUpdateManagementState(t *testing.T) {
 		name      string
 		connected bool
 		want      bool
+		err       error
 	}{
-		{"should mark as connected", true, true},
-		{"should mark as disconnected", false, false},
+		{"should mark as connected", true, true, nil},
+		{"should mark as disconnected", false, false, errors.New("test")},
 	}
 
 	status := NewRecorder(url)
@@ -190,9 +194,10 @@ func TestUpdateManagementState(t *testing.T) {
 			if test.connected {
 				status.MarkManagementConnected()
 			} else {
-				status.MarkManagementDisconnected()
+				status.MarkManagementDisconnected(test.err)
 			}
 			assert.Equal(t, test.want, status.managementState, "signalState status should be equal")
+			assert.Equal(t, test.err, status.managementError)
 		})
 	}
 }

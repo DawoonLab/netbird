@@ -10,12 +10,13 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/stretchr/testify/require"
 
-	fw "github.com/netbirdio/netbird/client/firewall"
+	fw "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/iface"
 )
 
 type IFaceMock struct {
 	SetFilterFunc func(iface.PacketFilter) error
+	AddressFunc   func() iface.WGAddress
 }
 
 func (i *IFaceMock) SetFilter(iface iface.PacketFilter) error {
@@ -23,6 +24,13 @@ func (i *IFaceMock) SetFilter(iface iface.PacketFilter) error {
 		return fmt.Errorf("not implemented")
 	}
 	return i.SetFilterFunc(iface)
+}
+
+func (i *IFaceMock) Address() iface.WGAddress {
+	if i.AddressFunc == nil {
+		return iface.WGAddress{}
+	}
+	return i.AddressFunc()
 }
 
 func TestManagerCreate(t *testing.T) {
@@ -63,7 +71,7 @@ func TestManagerAddFiltering(t *testing.T) {
 	action := fw.ActionDrop
 	comment := "Test rule"
 
-	rule, err := m.AddFiltering(ip, proto, nil, port, direction, action, comment)
+	rule, err := m.AddFiltering(ip, proto, nil, port, direction, action, "", comment)
 	if err != nil {
 		t.Errorf("failed to add filtering: %v", err)
 		return
@@ -98,7 +106,7 @@ func TestManagerDeleteRule(t *testing.T) {
 	action := fw.ActionDrop
 	comment := "Test rule"
 
-	rule, err := m.AddFiltering(ip, proto, nil, port, direction, action, comment)
+	rule, err := m.AddFiltering(ip, proto, nil, port, direction, action, "", comment)
 	if err != nil {
 		t.Errorf("failed to add filtering: %v", err)
 		return
@@ -111,30 +119,38 @@ func TestManagerDeleteRule(t *testing.T) {
 	action = fw.ActionDrop
 	comment = "Test rule 2"
 
-	rule2, err := m.AddFiltering(ip, proto, nil, port, direction, action, comment)
+	rule2, err := m.AddFiltering(ip, proto, nil, port, direction, action, "", comment)
 	if err != nil {
 		t.Errorf("failed to add filtering: %v", err)
 		return
 	}
 
-	err = m.DeleteRule(rule)
-	if err != nil {
-		t.Errorf("failed to delete rule: %v", err)
-		return
+	for _, r := range rule {
+		err = m.DeleteRule(r)
+		if err != nil {
+			t.Errorf("failed to delete rule: %v", err)
+			return
+		}
 	}
 
-	if idx, ok := m.rulesIndex[rule2.GetRuleID()]; !ok || len(m.incomingRules) != 1 || idx != 0 {
-		t.Errorf("rule2 is not in the rulesIndex")
+	for _, r := range rule2 {
+		if _, ok := m.incomingRules[ip.String()][r.GetRuleID()]; !ok {
+			t.Errorf("rule2 is not in the incomingRules")
+		}
 	}
 
-	err = m.DeleteRule(rule2)
-	if err != nil {
-		t.Errorf("failed to delete rule: %v", err)
-		return
+	for _, r := range rule2 {
+		err = m.DeleteRule(r)
+		if err != nil {
+			t.Errorf("failed to delete rule: %v", err)
+			return
+		}
 	}
 
-	if len(m.rulesIndex) != 0 || len(m.incomingRules) != 0 {
-		t.Errorf("rule1 still in the rulesIndex")
+	for _, r := range rule2 {
+		if _, ok := m.incomingRules[ip.String()][r.GetRuleID()]; ok {
+			t.Errorf("rule2 is not in the incomingRules")
+		}
 	}
 }
 
@@ -169,26 +185,29 @@ func TestAddUDPPacketHook(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := &Manager{
-				incomingRules: []Rule{},
-				outgoingRules: []Rule{},
-				rulesIndex:    make(map[string]int),
+				incomingRules: map[string]RuleSet{},
+				outgoingRules: map[string]RuleSet{},
 			}
 
 			manager.AddUDPPacketHook(tt.in, tt.ip, tt.dPort, tt.hook)
 
 			var addedRule Rule
 			if tt.in {
-				if len(manager.incomingRules) != 1 {
+				if len(manager.incomingRules[tt.ip.String()]) != 1 {
 					t.Errorf("expected 1 incoming rule, got %d", len(manager.incomingRules))
 					return
 				}
-				addedRule = manager.incomingRules[0]
+				for _, rule := range manager.incomingRules[tt.ip.String()] {
+					addedRule = rule
+				}
 			} else {
 				if len(manager.outgoingRules) != 1 {
 					t.Errorf("expected 1 outgoing rule, got %d", len(manager.outgoingRules))
 					return
 				}
-				addedRule = manager.outgoingRules[0]
+				for _, rule := range manager.outgoingRules[tt.ip.String()] {
+					addedRule = rule
+				}
 			}
 
 			if !tt.ip.Equal(addedRule.ip) {
@@ -209,17 +228,6 @@ func TestAddUDPPacketHook(t *testing.T) {
 			}
 			if addedRule.udpHook == nil {
 				t.Errorf("expected udpHook to be set")
-				return
-			}
-
-			// Ensure rulesIndex is correctly updated
-			index, ok := manager.rulesIndex[addedRule.id]
-			if !ok {
-				t.Errorf("expected rule to be in rulesIndex")
-				return
-			}
-			if index != 0 {
-				t.Errorf("expected rule index to be 0, got %d", index)
 				return
 			}
 		})
@@ -244,7 +252,7 @@ func TestManagerReset(t *testing.T) {
 	action := fw.ActionDrop
 	comment := "Test rule"
 
-	_, err = m.AddFiltering(ip, proto, nil, port, direction, action, comment)
+	_, err = m.AddFiltering(ip, proto, nil, port, direction, action, "", comment)
 	if err != nil {
 		t.Errorf("failed to add filtering: %v", err)
 		return
@@ -256,7 +264,7 @@ func TestManagerReset(t *testing.T) {
 		return
 	}
 
-	if len(m.rulesIndex) != 0 || len(m.outgoingRules) != 0 || len(m.incomingRules) != 0 {
+	if len(m.outgoingRules) != 0 || len(m.incomingRules) != 0 {
 		t.Errorf("rules is not empty")
 	}
 }
@@ -282,7 +290,7 @@ func TestNotMatchByIP(t *testing.T) {
 	action := fw.ActionAccept
 	comment := "Test rule"
 
-	_, err = m.AddFiltering(ip, proto, nil, nil, direction, action, comment)
+	_, err = m.AddFiltering(ip, proto, nil, nil, direction, action, "", comment)
 	if err != nil {
 		t.Errorf("failed to add filtering: %v", err)
 		return
@@ -346,10 +354,12 @@ func TestRemovePacketHook(t *testing.T) {
 
 	// Assert the hook is added by finding it in the manager's outgoing rules
 	found := false
-	for _, rule := range manager.outgoingRules {
-		if rule.id == hookID {
-			found = true
-			break
+	for _, arr := range manager.outgoingRules {
+		for _, rule := range arr {
+			if rule.id == hookID {
+				found = true
+				break
+			}
 		}
 	}
 
@@ -364,9 +374,11 @@ func TestRemovePacketHook(t *testing.T) {
 	}
 
 	// Assert the hook is removed by checking it in the manager's outgoing rules
-	for _, rule := range manager.outgoingRules {
-		if rule.id == hookID {
-			t.Fatalf("The hook was not removed properly.")
+	for _, arr := range manager.outgoingRules {
+		for _, rule := range arr {
+			if rule.id == hookID {
+				t.Fatalf("The hook was not removed properly.")
+			}
 		}
 	}
 }
@@ -394,9 +406,9 @@ func TestUSPFilterCreatePerformance(t *testing.T) {
 			for i := 0; i < testMax; i++ {
 				port := &fw.Port{Values: []int{1000 + i}}
 				if i%2 == 0 {
-					_, err = manager.AddFiltering(ip, "tcp", nil, port, fw.RuleDirectionOUT, fw.ActionAccept, "accept HTTP traffic")
+					_, err = manager.AddFiltering(ip, "tcp", nil, port, fw.RuleDirectionOUT, fw.ActionAccept, "", "accept HTTP traffic")
 				} else {
-					_, err = manager.AddFiltering(ip, "tcp", nil, port, fw.RuleDirectionIN, fw.ActionAccept, "accept HTTP traffic")
+					_, err = manager.AddFiltering(ip, "tcp", nil, port, fw.RuleDirectionIN, fw.ActionAccept, "", "accept HTTP traffic")
 				}
 
 				require.NoError(t, err, "failed to add rule")

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/transport/v2/stdnet"
+	"github.com/pion/transport/v3/stdnet"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,7 +213,7 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU, nil, newNet)
+	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", engine.config.WgPort, key.String(), iface.DefaultMTU, newNet, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,9 +367,9 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 					t.Errorf("expecting Engine.peerConns to contain peer %s", p)
 				}
 				expectedAllowedIPs := strings.Join(p.AllowedIps, ",")
-				if conn.GetConf().ProxyConfig.AllowedIps != expectedAllowedIPs {
+				if conn.WgConfig().AllowedIps != expectedAllowedIPs {
 					t.Errorf("expecting peer %s to have AllowedIPs= %s, got %s", p.GetWgPubKey(),
-						expectedAllowedIPs, conn.GetConf().ProxyConfig.AllowedIps)
+						expectedAllowedIPs, conn.WgConfig().AllowedIps)
 				}
 			}
 		})
@@ -567,7 +567,7 @@ func TestEngine_UpdateNetworkMapWithRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, engine.config.WgPort, key.String(), iface.DefaultMTU, newNet, nil)
 			assert.NoError(t, err, "shouldn't return error")
 			input := struct {
 				inputSerial uint64
@@ -736,7 +736,7 @@ func TestEngine_UpdateNetworkMapWithDNSUpdate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
+			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, 33100, key.String(), iface.DefaultMTU, newNet, nil)
 			assert.NoError(t, err, "shouldn't return error")
 
 			mockRouteManager := &routemanager.MockManager{
@@ -869,7 +869,7 @@ loop:
 		case <-ticker.C:
 			totalConnected := 0
 			for _, engine := range engines {
-				totalConnected = totalConnected + getConnectedPeers(engine)
+				totalConnected += getConnectedPeers(engine)
 			}
 			if totalConnected == expectedConnected {
 				log.Infof("total connected=%d", totalConnected)
@@ -1039,22 +1039,23 @@ func startManagement(dataDir string) (*grpc.Server, string, error) {
 		return nil, "", err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
-	store, err := server.NewFileStore(config.Datadir, nil)
+	store, err := server.NewStoreFromJson(config.Datadir, nil)
 	if err != nil {
-		log.Fatalf("failed creating a store: %s: %v", config.Datadir, err)
+		return nil, "", err
 	}
-	peersUpdateManager := server.NewPeersUpdateManager()
+
+	peersUpdateManager := server.NewPeersUpdateManager(nil)
 	eventStore := &activity.InMemoryEventStore{}
 	if err != nil {
-		return nil, "", nil
+		return nil, "", err
 	}
 	accountManager, err := server.BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore)
+		eventStore, false)
 	if err != nil {
 		return nil, "", err
 	}
 	turnManager := server.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, nil)
+	mgmtServer, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}

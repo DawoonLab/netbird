@@ -2,13 +2,16 @@ package server
 
 import (
 	"fmt"
+	"strconv"
+
 	"github.com/miekg/dns"
+	log "github.com/sirupsen/logrus"
+
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/management/proto"
 	"github.com/netbirdio/netbird/management/server/activity"
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	"github.com/netbirdio/netbird/management/server/status"
-	log "github.com/sirupsen/logrus"
-	"strconv"
 )
 
 const defaultTTL = 300
@@ -18,23 +21,15 @@ type lookupMap map[string]struct{}
 // DNSSettings defines dns settings at the account level
 type DNSSettings struct {
 	// DisabledManagementGroups groups whose DNS management is disabled
-	DisabledManagementGroups []string
+	DisabledManagementGroups []string `gorm:"serializer:json"`
 }
 
 // Copy returns a copy of the DNS settings
-func (d *DNSSettings) Copy() *DNSSettings {
-	settings := &DNSSettings{
-		DisabledManagementGroups: make([]string, 0),
+func (d DNSSettings) Copy() DNSSettings {
+	settings := DNSSettings{
+		DisabledManagementGroups: make([]string, len(d.DisabledManagementGroups)),
 	}
-
-	if d == nil {
-		return settings
-	}
-
-	if d.DisabledManagementGroups != nil && len(d.DisabledManagementGroups) > 0 {
-		settings.DisabledManagementGroups = d.DisabledManagementGroups[:]
-	}
-
+	copy(settings.DisabledManagementGroups, d.DisabledManagementGroups)
 	return settings
 }
 
@@ -53,15 +48,11 @@ func (am *DefaultAccountManager) GetDNSSettings(accountID string, userID string)
 		return nil, err
 	}
 
-	if !user.IsAdmin() {
-		return nil, status.Errorf(status.PermissionDenied, "only admins are allowed to view DNS settings")
+	if !(user.HasAdminPower() || user.IsServiceUser) {
+		return nil, status.Errorf(status.PermissionDenied, "only users with admin power are allowed to view DNS settings")
 	}
-
-	if account.DNSSettings == nil {
-		return &DNSSettings{}, nil
-	}
-
-	return account.DNSSettings.Copy(), nil
+	dnsSettings := account.DNSSettings.Copy()
+	return &dnsSettings, nil
 }
 
 // SaveDNSSettings validates a user role and updates the account's DNS settings
@@ -79,8 +70,8 @@ func (am *DefaultAccountManager) SaveDNSSettings(accountID string, userID string
 		return err
 	}
 
-	if !user.IsAdmin() {
-		return status.Errorf(status.PermissionDenied, "only admins are allowed to update DNS settings")
+	if !user.HasAdminPower() {
+		return status.Errorf(status.PermissionDenied, "only users with admin power are allowed to update DNS settings")
 	}
 
 	if dnsSettingsToSave == nil {
@@ -94,11 +85,7 @@ func (am *DefaultAccountManager) SaveDNSSettings(accountID string, userID string
 		}
 	}
 
-	oldSettings := &DNSSettings{}
-	if account.DNSSettings != nil {
-		oldSettings = account.DNSSettings.Copy()
-	}
-
+	oldSettings := account.DNSSettings.Copy()
 	account.DNSSettings = dnsSettingsToSave.Copy()
 
 	account.Network.IncSerial()
@@ -110,17 +97,19 @@ func (am *DefaultAccountManager) SaveDNSSettings(accountID string, userID string
 	for _, id := range addedGroups {
 		group := account.GetGroup(id)
 		meta := map[string]any{"group": group.Name, "group_id": group.ID}
-		am.storeEvent(userID, accountID, accountID, activity.GroupAddedToDisabledManagementGroups, meta)
+		am.StoreEvent(userID, accountID, accountID, activity.GroupAddedToDisabledManagementGroups, meta)
 	}
 
 	removedGroups := difference(oldSettings.DisabledManagementGroups, dnsSettingsToSave.DisabledManagementGroups)
 	for _, id := range removedGroups {
 		group := account.GetGroup(id)
 		meta := map[string]any{"group": group.Name, "group_id": group.ID}
-		am.storeEvent(userID, accountID, accountID, activity.GroupRemovedFromDisabledManagementGroups, meta)
+		am.StoreEvent(userID, accountID, accountID, activity.GroupRemovedFromDisabledManagementGroups, meta)
 	}
 
-	return am.updateAccountPeers(account)
+	am.updateAccountPeers(account)
+
+	return nil
 }
 
 func toProtocolDNSConfig(update nbdns.Config) *proto.DNSConfig {
@@ -142,8 +131,9 @@ func toProtocolDNSConfig(update nbdns.Config) *proto.DNSConfig {
 
 	for _, nsGroup := range update.NameServerGroups {
 		protoGroup := &proto.NameServerGroup{
-			Primary: nsGroup.Primary,
-			Domains: nsGroup.Domains,
+			Primary:              nsGroup.Primary,
+			Domains:              nsGroup.Domains,
+			SearchDomainsEnabled: nsGroup.SearchDomainsEnabled,
 		}
 		for _, ns := range nsGroup.NameServers {
 			protoNS := &proto.NameServer{
@@ -199,13 +189,25 @@ func getPeerNSGroups(account *Account, peerID string) []*nbdns.NameServerGroup {
 		for _, gID := range nsGroup.Groups {
 			_, found := groupList[gID]
 			if found {
-				peerNSGroups = append(peerNSGroups, nsGroup.Copy())
-				break
+				if !peerIsNameserver(account.GetPeer(peerID), nsGroup) {
+					peerNSGroups = append(peerNSGroups, nsGroup.Copy())
+					break
+				}
 			}
 		}
 	}
 
 	return peerNSGroups
+}
+
+// peerIsNameserver returns true if the peer is a nameserver for a nsGroup
+func peerIsNameserver(peer *nbpeer.Peer, nsGroup *nbdns.NameServerGroup) bool {
+	for _, ns := range nsGroup.NameServers {
+		if peer.IP.Equal(ns.IP.AsSlice()) {
+			return true
+		}
+	}
+	return false
 }
 
 func addPeerLabelsToAccount(account *Account, peerLabels lookupMap) {
@@ -215,7 +217,7 @@ func addPeerLabelsToAccount(account *Account, peerLabels lookupMap) {
 			log.Errorf("got an error while generating a peer host label. Peer name %s, error: %v. Trying with the peer's meta hostname", peer.Name, err)
 			label, err = getPeerHostLabel(peer.Meta.Hostname, peerLabels)
 			if err != nil {
-				log.Errorf("got another error while generating a peer host label with hostname. Peer hostname %s, error: %v. Skiping", peer.Meta.Hostname, err)
+				log.Errorf("got another error while generating a peer host label with hostname. Peer hostname %s, error: %v. Skipping", peer.Meta.Hostname, err)
 				continue
 			}
 		}

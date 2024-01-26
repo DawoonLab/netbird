@@ -12,8 +12,9 @@ import (
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
+	"github.com/netbirdio/netbird/client/internal/dns"
+	"github.com/netbirdio/netbird/client/internal/listener"
 	"github.com/netbirdio/netbird/client/internal/peer"
-	"github.com/netbirdio/netbird/client/internal/routemanager"
 	"github.com/netbirdio/netbird/client/internal/stdnet"
 	"github.com/netbirdio/netbird/client/ssh"
 	"github.com/netbirdio/netbird/client/system"
@@ -21,10 +22,77 @@ import (
 	mgm "github.com/netbirdio/netbird/management/client"
 	mgmProto "github.com/netbirdio/netbird/management/proto"
 	signal "github.com/netbirdio/netbird/signal/client"
+	"github.com/netbirdio/netbird/version"
 )
 
 // RunClient with main logic.
-func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status, tunAdapter iface.TunAdapter, iFaceDiscover stdnet.ExternalIFaceDiscover, routeListener routemanager.RouteListener) error {
+func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status) error {
+	return runClient(ctx, config, statusRecorder, MobileDependency{}, nil, nil, nil, nil)
+}
+
+// RunClientWithProbes runs the client's main logic with probes attached
+func RunClientWithProbes(
+	ctx context.Context,
+	config *Config,
+	statusRecorder *peer.Status,
+	mgmProbe *Probe,
+	signalProbe *Probe,
+	relayProbe *Probe,
+	wgProbe *Probe,
+) error {
+	return runClient(ctx, config, statusRecorder, MobileDependency{}, mgmProbe, signalProbe, relayProbe, wgProbe)
+}
+
+// RunClientMobile with main logic on mobile system
+func RunClientMobile(
+	ctx context.Context,
+	config *Config,
+	statusRecorder *peer.Status,
+	tunAdapter iface.TunAdapter,
+	iFaceDiscover stdnet.ExternalIFaceDiscover,
+	networkChangeListener listener.NetworkChangeListener,
+	dnsAddresses []string,
+	dnsReadyListener dns.ReadyListener,
+) error {
+	// in case of non Android os these variables will be nil
+	mobileDependency := MobileDependency{
+		TunAdapter:            tunAdapter,
+		IFaceDiscover:         iFaceDiscover,
+		NetworkChangeListener: networkChangeListener,
+		HostDNSAddresses:      dnsAddresses,
+		DnsReadyListener:      dnsReadyListener,
+	}
+	return runClient(ctx, config, statusRecorder, mobileDependency, nil, nil, nil, nil)
+}
+
+func RunClientiOS(
+	ctx context.Context,
+	config *Config,
+	statusRecorder *peer.Status,
+	fileDescriptor int32,
+	networkChangeListener listener.NetworkChangeListener,
+	dnsManager dns.IosDnsManager,
+) error {
+	mobileDependency := MobileDependency{
+		FileDescriptor:        fileDescriptor,
+		NetworkChangeListener: networkChangeListener,
+		DnsManager:            dnsManager,
+	}
+	return runClient(ctx, config, statusRecorder, mobileDependency, nil, nil, nil, nil)
+}
+
+func runClient(
+	ctx context.Context,
+	config *Config,
+	statusRecorder *peer.Status,
+	mobileDependency MobileDependency,
+	mgmProbe *Probe,
+	signalProbe *Probe,
+	relayProbe *Probe,
+	wgProbe *Probe,
+) error {
+	log.Infof("starting NetBird client version %s", version.NetbirdVersion())
+
 	backOff := &backoff.ExponentialBackOff{
 		InitialInterval:     time.Second,
 		RandomizationFactor: 1,
@@ -73,12 +141,12 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status,
 
 		engineCtx, cancel := context.WithCancel(ctx)
 		defer func() {
-			statusRecorder.MarkManagementDisconnected()
+			statusRecorder.MarkManagementDisconnected(state.err)
 			statusRecorder.CleanLocalPeerState()
 			cancel()
 		}()
 
-		log.Debugf("conecting to the Management service %s", config.ManagementURL.Host)
+		log.Debugf("connecting to the Management service %s", config.ManagementURL.Host)
 		mgmClient, err := mgm.NewClient(engineCtx, config.ManagementURL.Host, myPrivateKey, mgmTlsEnabled)
 		if err != nil {
 			return wrapErr(gstatus.Errorf(codes.FailedPrecondition, "failed connecting to Management Service : %s", err))
@@ -122,8 +190,10 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status,
 
 		statusRecorder.UpdateSignalAddress(signalURL)
 
-		statusRecorder.MarkSignalDisconnected()
-		defer statusRecorder.MarkSignalDisconnected()
+		statusRecorder.MarkSignalDisconnected(nil)
+		defer func() {
+			statusRecorder.MarkSignalDisconnected(state.err)
+		}()
 
 		// with the global Wiretrustee config in hand connect (just a connection, no stream yet) Signal
 		signalClient, err := connectToSignal(engineCtx, loginResp.GetWiretrusteeConfig(), myPrivateKey)
@@ -151,14 +221,7 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status,
 			return wrapErr(err)
 		}
 
-		// in case of non Android os these variables will be nil
-		md := MobileDependency{
-			TunAdapter:    tunAdapter,
-			IFaceDiscover: iFaceDiscover,
-			RouteListener: routeListener,
-		}
-
-		engine := NewEngine(engineCtx, cancel, signalClient, mgmClient, engineConfig, md, statusRecorder)
+		engine := NewEngineWithProbes(engineCtx, cancel, signalClient, mgmClient, engineConfig, mobileDependency, statusRecorder, mgmProbe, signalProbe, relayProbe, wgProbe)
 		err = engine.Start()
 		if err != nil {
 			log.Errorf("error while starting Netbird Connection Engine: %s", err)
@@ -167,8 +230,6 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status,
 
 		log.Print("Netbird engine started, my IP is: ", peerConfig.Address)
 		state.Set(StatusConnected)
-
-		statusRecorder.ClientStart()
 
 		<-engineCtx.Done()
 		statusRecorder.ClientTeardown()
@@ -190,6 +251,7 @@ func RunClient(ctx context.Context, config *Config, statusRecorder *peer.Status,
 		return nil
 	}
 
+	statusRecorder.ClientStart()
 	err = backoff.Retry(operation, backOff)
 	if err != nil {
 		log.Debugf("exiting client retry loop due to unrecoverable error: %s", err)
@@ -213,6 +275,7 @@ func createEngineConfig(key wgtypes.Key, config *Config, peerConfig *mgmProto.Pe
 		SSHKey:               []byte(config.SSHKey),
 		NATExternalIPs:       config.NATExternalIPs,
 		CustomDNSAddress:     config.CustomDNSAddress,
+		RosenpassEnabled:     config.RosenpassEnabled,
 	}
 
 	if config.PreSharedKey != "" {
@@ -259,83 +322,6 @@ func loginToManagement(ctx context.Context, client mgm.Client, pubSSHKey []byte)
 	}
 
 	return loginResp, nil
-}
-
-// UpdateOldManagementPort checks whether client can switch to the new Management port 443.
-// If it can switch, then it updates the config and returns a new one. Otherwise, it returns the provided config.
-// The check is performed only for the NetBird's managed version.
-func UpdateOldManagementPort(ctx context.Context, config *Config, configPath string) (*Config, error) {
-
-	defaultManagementURL, err := parseURL("Management URL", DefaultManagementURL)
-	if err != nil {
-		return nil, err
-	}
-
-	if config.ManagementURL.Hostname() != defaultManagementURL.Hostname() {
-		// only do the check for the NetBird's managed version
-		return config, nil
-	}
-
-	var mgmTlsEnabled bool
-	if config.ManagementURL.Scheme == "https" {
-		mgmTlsEnabled = true
-	}
-
-	if !mgmTlsEnabled {
-		// only do the check for HTTPs scheme (the hosted version of the Management service is always HTTPs)
-		return config, nil
-	}
-
-	if mgmTlsEnabled && config.ManagementURL.Port() == fmt.Sprintf("%d", ManagementLegacyPort) {
-
-		newURL, err := parseURL("Management URL", fmt.Sprintf("%s://%s:%d",
-			config.ManagementURL.Scheme, config.ManagementURL.Hostname(), 443))
-		if err != nil {
-			return nil, err
-		}
-		// here we check whether we could switch from the legacy 33073 port to the new 443
-		log.Infof("attempting to switch from the legacy Management URL %s to the new one %s",
-			config.ManagementURL.String(), newURL.String())
-		key, err := wgtypes.ParseKey(config.PrivateKey)
-		if err != nil {
-			log.Infof("couldn't switch to the new Management %s", newURL.String())
-			return config, err
-		}
-
-		client, err := mgm.NewClient(ctx, newURL.Host, key, mgmTlsEnabled)
-		if err != nil {
-			log.Infof("couldn't switch to the new Management %s", newURL.String())
-			return config, err
-		}
-		defer func() {
-			err = client.Close()
-			if err != nil {
-				log.Warnf("failed to close the Management service client %v", err)
-			}
-		}()
-
-		// gRPC check
-		_, err = client.GetServerPublicKey()
-		if err != nil {
-			log.Infof("couldn't switch to the new Management %s", newURL.String())
-			return nil, err
-		}
-
-		// everything is alright => update the config
-		newConfig, err := UpdateConfig(ConfigInput{
-			ManagementURL: newURL.String(),
-			ConfigPath:    configPath,
-		})
-		if err != nil {
-			log.Infof("couldn't switch to the new Management %s", newURL.String())
-			return config, fmt.Errorf("failed updating config file: %v", err)
-		}
-		log.Infof("successfully switched to the new Management URL: %s", newURL.String())
-
-		return newConfig, nil
-	}
-
-	return config, nil
 }
 
 func statusRecorderToMgmConnStateNotifier(statusRecorder *peer.Status) mgm.ConnStateNotifier {

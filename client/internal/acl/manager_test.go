@@ -1,11 +1,16 @@
 package acl
 
 import (
+	"context"
+	"net"
 	"testing"
 
 	"github.com/golang/mock/gomock"
 
+	"github.com/netbirdio/netbird/client/firewall"
+	"github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/internal/acl/mocks"
+	"github.com/netbirdio/netbird/iface"
 	mgmProto "github.com/netbirdio/netbird/management/proto"
 )
 
@@ -32,18 +37,30 @@ func TestDefaultManager(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	iface := mocks.NewMockIFaceMapper(ctrl)
-	iface.EXPECT().IsUserspaceBind().Return(true)
-	// iface.EXPECT().Name().Return("lo")
-	iface.EXPECT().SetFilter(gomock.Any())
+	ifaceMock := mocks.NewMockIFaceMapper(ctrl)
+	ifaceMock.EXPECT().IsUserspaceBind().Return(true).AnyTimes()
+	ifaceMock.EXPECT().SetFilter(gomock.Any())
+	ip, network, err := net.ParseCIDR("172.0.0.1/32")
+	if err != nil {
+		t.Fatalf("failed to parse IP address: %v", err)
+	}
+
+	ifaceMock.EXPECT().Name().Return("lo").AnyTimes()
+	ifaceMock.EXPECT().Address().Return(iface.WGAddress{
+		IP:      ip,
+		Network: network,
+	}).AnyTimes()
 
 	// we receive one rule from the management so for testing purposes ignore it
-	acl, err := Create(iface)
+	fw, err := firewall.NewFirewall(context.Background(), ifaceMock)
 	if err != nil {
-		t.Errorf("create ACL manager: %v", err)
+		t.Errorf("create firewall: %v", err)
 		return
 	}
-	defer acl.Stop()
+	defer func(fw manager.Manager) {
+		_ = fw.Reset()
+	}(fw)
+	acl := NewDefaultManager(fw)
 
 	t.Run("apply firewall rules", func(t *testing.T) {
 		acl.ApplyFiltering(networkMap)
@@ -55,6 +72,11 @@ func TestDefaultManager(t *testing.T) {
 	})
 
 	t.Run("add extra rules", func(t *testing.T) {
+		existedPairs := map[string]struct{}{}
+		for id := range acl.rulesPairs {
+			existedPairs[id] = struct{}{}
+		}
+
 		// remove first rule
 		networkMap.FirewallRules = networkMap.FirewallRules[1:]
 		networkMap.FirewallRules = append(
@@ -67,11 +89,6 @@ func TestDefaultManager(t *testing.T) {
 			},
 		)
 
-		existedRulesID := map[string]struct{}{}
-		for id := range acl.rulesPairs {
-			existedRulesID[id] = struct{}{}
-		}
-
 		acl.ApplyFiltering(networkMap)
 
 		// we should have one old and one new rule in the existed rules
@@ -80,12 +97,15 @@ func TestDefaultManager(t *testing.T) {
 			return
 		}
 
-		// check that old rules was removed
-		for id := range existedRulesID {
-			if _, ok := acl.rulesPairs[id]; ok {
-				t.Errorf("old rule was not removed")
-				return
+		// check that old rule was removed
+		previousCount := 0
+		for id := range acl.rulesPairs {
+			if _, ok := existedPairs[id]; ok {
+				previousCount++
 			}
+		}
+		if previousCount != 1 {
+			t.Errorf("old rule was not removed")
 		}
 	})
 
@@ -175,31 +195,33 @@ func TestDefaultManagerSquashRules(t *testing.T) {
 	}
 
 	r := rules[0]
-	if r.PeerIP != "0.0.0.0" {
+	switch {
+	case r.PeerIP != "0.0.0.0":
 		t.Errorf("IP should be 0.0.0.0, got: %v", r.PeerIP)
 		return
-	} else if r.Direction != mgmProto.FirewallRule_IN {
+	case r.Direction != mgmProto.FirewallRule_IN:
 		t.Errorf("direction should be IN, got: %v", r.Direction)
 		return
-	} else if r.Protocol != mgmProto.FirewallRule_ALL {
+	case r.Protocol != mgmProto.FirewallRule_ALL:
 		t.Errorf("protocol should be ALL, got: %v", r.Protocol)
 		return
-	} else if r.Action != mgmProto.FirewallRule_ACCEPT {
+	case r.Action != mgmProto.FirewallRule_ACCEPT:
 		t.Errorf("action should be ACCEPT, got: %v", r.Action)
 		return
 	}
 
 	r = rules[1]
-	if r.PeerIP != "0.0.0.0" {
+	switch {
+	case r.PeerIP != "0.0.0.0":
 		t.Errorf("IP should be 0.0.0.0, got: %v", r.PeerIP)
 		return
-	} else if r.Direction != mgmProto.FirewallRule_OUT {
+	case r.Direction != mgmProto.FirewallRule_OUT:
 		t.Errorf("direction should be OUT, got: %v", r.Direction)
 		return
-	} else if r.Protocol != mgmProto.FirewallRule_ALL {
+	case r.Protocol != mgmProto.FirewallRule_ALL:
 		t.Errorf("protocol should be ALL, got: %v", r.Protocol)
 		return
-	} else if r.Action != mgmProto.FirewallRule_ACCEPT {
+	case r.Action != mgmProto.FirewallRule_ACCEPT:
 		t.Errorf("action should be ACCEPT, got: %v", r.Action)
 		return
 	}
@@ -267,7 +289,7 @@ func TestDefaultManagerSquashRulesNoAffect(t *testing.T) {
 
 	manager := &DefaultManager{}
 	if rules, _ := manager.squashAcceptRules(networkMap); len(rules) != len(networkMap.FirewallRules) {
-		t.Errorf("we should got same amount of rules as intput, got %v", len(rules))
+		t.Errorf("we should get the same amount of rules as output, got %v", len(rules))
 	}
 }
 
@@ -308,18 +330,30 @@ func TestDefaultManagerEnableSSHRules(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	iface := mocks.NewMockIFaceMapper(ctrl)
-	iface.EXPECT().IsUserspaceBind().Return(true)
-	// iface.EXPECT().Name().Return("lo")
-	iface.EXPECT().SetFilter(gomock.Any())
+	ifaceMock := mocks.NewMockIFaceMapper(ctrl)
+	ifaceMock.EXPECT().IsUserspaceBind().Return(true).AnyTimes()
+	ifaceMock.EXPECT().SetFilter(gomock.Any())
+	ip, network, err := net.ParseCIDR("172.0.0.1/32")
+	if err != nil {
+		t.Fatalf("failed to parse IP address: %v", err)
+	}
+
+	ifaceMock.EXPECT().Name().Return("lo").AnyTimes()
+	ifaceMock.EXPECT().Address().Return(iface.WGAddress{
+		IP:      ip,
+		Network: network,
+	}).AnyTimes()
 
 	// we receive one rule from the management so for testing purposes ignore it
-	acl, err := Create(iface)
+	fw, err := firewall.NewFirewall(context.Background(), ifaceMock)
 	if err != nil {
-		t.Errorf("create ACL manager: %v", err)
+		t.Errorf("create firewall: %v", err)
 		return
 	}
-	defer acl.Stop()
+	defer func(fw manager.Manager) {
+		_ = fw.Reset()
+	}(fw)
+	acl := NewDefaultManager(fw)
 
 	acl.ApplyFiltering(networkMap)
 

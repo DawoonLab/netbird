@@ -72,7 +72,7 @@ func (h *GroupsHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, ok = account.Groups[groupID]
+	eg, ok := account.Groups[groupID]
 	if !ok {
 		util.WriteError(status.Errorf(status.NotFound, "couldn't find group with ID %s", groupID), w)
 		return
@@ -107,9 +107,11 @@ func (h *GroupsHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		peers = *req.Peers
 	}
 	group := server.Group{
-		ID:    groupID,
-		Name:  req.Name,
-		Peers: peers,
+		ID:                   groupID,
+		Name:                 req.Name,
+		Peers:                peers,
+		Issued:               eg.Issued,
+		IntegrationReference: eg.IntegrationReference,
 	}
 
 	if err := h.accountManager.SaveGroup(account.Id, user.Id, &group); err != nil {
@@ -149,9 +151,10 @@ func (h *GroupsHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		peers = *req.Peers
 	}
 	group := server.Group{
-		ID:    xid.New().String(),
-		Name:  req.Name,
-		Peers: peers,
+		ID:     xid.New().String(),
+		Name:   req.Name,
+		Peers:  peers,
+		Issued: server.GroupIssuedAPI,
 	}
 
 	err = h.accountManager.SaveGroup(account.Id, user.Id, &group)
@@ -166,7 +169,7 @@ func (h *GroupsHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 // DeleteGroup handles group deletion request
 func (h *GroupsHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 	claims := h.claimsExtractor.FromRequestContext(r)
-	account, _, err := h.accountManager.GetAccountFromToken(claims)
+	account, user, err := h.accountManager.GetAccountFromToken(claims)
 	if err != nil {
 		util.WriteError(err, w)
 		return
@@ -190,8 +193,13 @@ func (h *GroupsHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.accountManager.DeleteGroup(aID, groupID)
+	err = h.accountManager.DeleteGroup(aID, user.Id, groupID)
 	if err != nil {
+		_, ok := err.(*server.GroupLinkError)
+		if ok {
+			util.WriteErrorResponse(err.Error(), http.StatusBadRequest, w)
+			return
+		}
 		util.WriteError(err, w)
 		return
 	}
@@ -224,10 +232,8 @@ func (h *GroupsHandler) GetGroup(w http.ResponseWriter, r *http.Request) {
 
 		util.WriteJSONObject(w, toGroupResponse(account, group))
 	default:
-		if err != nil {
-			util.WriteError(status.Errorf(status.NotFound, "HTTP method not found"), w)
-			return
-		}
+		util.WriteError(status.Errorf(status.NotFound, "HTTP method not found"), w)
+		return
 	}
 }
 
@@ -237,6 +243,7 @@ func toGroupResponse(account *server.Account, group *server.Group) *api.Group {
 		Id:         group.ID,
 		Name:       group.Name,
 		PeersCount: len(group.Peers),
+		Issued:     &group.Issued,
 	}
 
 	for _, pid := range group.Peers {

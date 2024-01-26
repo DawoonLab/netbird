@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/netbirdio/management-integrations/integrations"
 	"io"
 	"io/fs"
 	"net"
@@ -19,28 +20,24 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/miekg/dns"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-
-	"github.com/netbirdio/netbird/management/server/activity/sqlite"
-	httpapi "github.com/netbirdio/netbird/management/server/http"
-	"github.com/netbirdio/netbird/management/server/jwtclaims"
-	"github.com/netbirdio/netbird/management/server/metrics"
-	"github.com/netbirdio/netbird/management/server/telemetry"
-
-	"github.com/netbirdio/netbird/management/server"
-	"github.com/netbirdio/netbird/management/server/idp"
-	"github.com/netbirdio/netbird/util"
-
-	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/netbirdio/netbird/encryption"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
+	"github.com/netbirdio/netbird/management/server"
+	httpapi "github.com/netbirdio/netbird/management/server/http"
+	"github.com/netbirdio/netbird/management/server/idp"
+	"github.com/netbirdio/netbird/management/server/jwtclaims"
+	"github.com/netbirdio/netbird/management/server/metrics"
+	"github.com/netbirdio/netbird/management/server/telemetry"
+	"github.com/netbirdio/netbird/util"
 )
 
 // ManagementLegacyPort is the port that was used before by the Management gRPC server.
@@ -72,15 +69,23 @@ var (
 		Use:   "management",
 		Short: "start NetBird Management Server",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			flag.Parse()
+			err := util.InitLog(logLevel, logFile)
+			if err != nil {
+				return fmt.Errorf("failed initializing log %v", err)
+			}
+
 			// detect whether user specified a port
 			userPort := cmd.Flag("port").Changed
 
-			var err error
 			config, err = loadMgmtConfig(mgmtConfig)
 			if err != nil {
 				return fmt.Errorf("failed reading provided config file: %s: %v", mgmtConfig, err)
 			}
-			config.HttpConfig.IdpSignKeyRefreshEnabled = idpSignKeyRefreshEnabled
+
+			if cmd.Flag(idpSignKeyRefreshEnabledFlagName).Changed {
+				config.HttpConfig.IdpSignKeyRefreshEnabled = idpSignKeyRefreshEnabled
+			}
 
 			tlsEnabled := false
 			if mgmtLetsencryptDomain != "" || (config.HttpConfig.CertFile != "" && config.HttpConfig.CertKey != "") {
@@ -98,19 +103,13 @@ var (
 
 			_, valid := dns.IsDomainName(dnsDomain)
 			if !valid || len(dnsDomain) > 192 {
-				return fmt.Errorf("failed parsing the provided dns-domain. Valid status: %t, Lenght: %d", valid, len(dnsDomain))
+				return fmt.Errorf("failed parsing the provided dns-domain. Valid status: %t, Length: %d", valid, len(dnsDomain))
 			}
 
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			flag.Parse()
-			err := util.InitLog(logLevel, logFile)
-			if err != nil {
-				return fmt.Errorf("failed initializing log %v", err)
-			}
-
-			err = handleRebrand(cmd)
+			err := handleRebrand(cmd)
 			if err != nil {
 				return fmt.Errorf("failed to migrate files %v", err)
 			}
@@ -129,11 +128,11 @@ var (
 			if err != nil {
 				return err
 			}
-			store, err := server.NewFileStore(config.Datadir, appMetrics)
+			store, err := server.NewStore(config.StoreConfig.Engine, config.Datadir, appMetrics)
 			if err != nil {
 				return fmt.Errorf("failed creating Store: %s: %v", config.Datadir, err)
 			}
-			peersUpdateManager := server.NewPeersUpdateManager()
+			peersUpdateManager := server.NewPeersUpdateManager(appMetrics)
 
 			var idpManager idp.Manager
 			if config.IdpManagerConfig != nil {
@@ -146,12 +145,22 @@ var (
 			if disableSingleAccMode {
 				mgmtSingleAccModeDomain = ""
 			}
-			eventStore, err := sqlite.NewSQLiteStore(config.Datadir)
+			eventStore, key, err := integrations.InitEventStore(config.Datadir, config.DataStoreEncryptionKey)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to initialize database: %s", err)
 			}
+
+			if config.DataStoreEncryptionKey != key {
+				log.Infof("update config with activity store key")
+				config.DataStoreEncryptionKey = key
+				err := updateMgmtConfig(mgmtConfig, config)
+				if err != nil {
+					return fmt.Errorf("failed to write out store encryption key: %s", err)
+				}
+			}
+
 			accountManager, err := server.BuildManager(store, peersUpdateManager, idpManager, mgmtSingleAccModeDomain,
-				dnsDomain, eventStore)
+				dnsDomain, eventStore, userDeleteFromIDPEnabled)
 			if err != nil {
 				return fmt.Errorf("failed to build default manager: %v", err)
 			}
@@ -202,8 +211,11 @@ var (
 				return fmt.Errorf("failed creating HTTP API handler: %v", err)
 			}
 
+			ephemeralManager := server.NewEphemeralManager(store, accountManager)
+			ephemeralManager.LoadInitialPeers()
+
 			gRPCAPIHandler := grpc.NewServer(gRPCOpts...)
-			srv, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, appMetrics)
+			srv, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, appMetrics, ephemeralManager)
 			if err != nil {
 				return fmt.Errorf("failed creating gRPC API handler: %v", err)
 			}
@@ -218,7 +230,11 @@ var (
 			if !disableMetrics {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				metricsWorker := metrics.NewWorker(ctx, installationID, store, peersUpdateManager)
+				idpManager := "disabled"
+				if config.IdpManagerConfig != nil && config.IdpManagerConfig.ManagerType != "" {
+					idpManager = config.IdpManagerConfig.ManagerType
+				}
+				metricsWorker := metrics.NewWorker(ctx, installationID, store, peersUpdateManager, idpManager)
 				go metricsWorker.Run()
 			}
 
@@ -268,6 +284,7 @@ var (
 			SetupCloseHandler()
 
 			<-stopCh
+			ephemeralManager.Stop()
 			_ = appMetrics.Close()
 			_ = listener.Close()
 			if certManager != nil {
@@ -367,24 +384,24 @@ func handlerFunc(gRPCHandler *grpc.Server, httpHandler http.Handler) http.Handle
 }
 
 func loadMgmtConfig(mgmtConfigPath string) (*server.Config, error) {
-	config := &server.Config{}
-	_, err := util.ReadJson(mgmtConfigPath, config)
+	loadedConfig := &server.Config{}
+	_, err := util.ReadJson(mgmtConfigPath, loadedConfig)
 	if err != nil {
 		return nil, err
 	}
 	if mgmtLetsencryptDomain != "" {
-		config.HttpConfig.LetsEncryptDomain = mgmtLetsencryptDomain
+		loadedConfig.HttpConfig.LetsEncryptDomain = mgmtLetsencryptDomain
 	}
 	if mgmtDataDir != "" {
-		config.Datadir = mgmtDataDir
+		loadedConfig.Datadir = mgmtDataDir
 	}
 
 	if certKey != "" && certFile != "" {
-		config.HttpConfig.CertFile = certFile
-		config.HttpConfig.CertKey = certKey
+		loadedConfig.HttpConfig.CertFile = certFile
+		loadedConfig.HttpConfig.CertKey = certKey
 	}
 
-	oidcEndpoint := config.HttpConfig.OIDCConfigEndpoint
+	oidcEndpoint := loadedConfig.HttpConfig.OIDCConfigEndpoint
 	if oidcEndpoint != "" {
 		// if OIDCConfigEndpoint is specified, we can load DeviceAuthEndpoint and TokenEndpoint automatically
 		log.Infof("loading OIDC configuration from the provided IDP configuration endpoint %s", oidcEndpoint)
@@ -395,44 +412,58 @@ func loadMgmtConfig(mgmtConfigPath string) (*server.Config, error) {
 		log.Infof("loaded OIDC configuration from the provided IDP configuration endpoint: %s", oidcEndpoint)
 
 		log.Infof("overriding HttpConfig.AuthIssuer with a new value %s, previously configured value: %s",
-			oidcConfig.Issuer, config.HttpConfig.AuthIssuer)
-		config.HttpConfig.AuthIssuer = oidcConfig.Issuer
+			oidcConfig.Issuer, loadedConfig.HttpConfig.AuthIssuer)
+		loadedConfig.HttpConfig.AuthIssuer = oidcConfig.Issuer
 
 		log.Infof("overriding HttpConfig.AuthKeysLocation (JWT certs) with a new value %s, previously configured value: %s",
-			oidcConfig.JwksURI, config.HttpConfig.AuthKeysLocation)
-		config.HttpConfig.AuthKeysLocation = oidcConfig.JwksURI
+			oidcConfig.JwksURI, loadedConfig.HttpConfig.AuthKeysLocation)
+		loadedConfig.HttpConfig.AuthKeysLocation = oidcConfig.JwksURI
 
-		if !(config.DeviceAuthorizationFlow == nil || strings.ToLower(config.DeviceAuthorizationFlow.Provider) == string(server.NONE)) {
+		if !(loadedConfig.DeviceAuthorizationFlow == nil || strings.ToLower(loadedConfig.DeviceAuthorizationFlow.Provider) == string(server.NONE)) {
 			log.Infof("overriding DeviceAuthorizationFlow.TokenEndpoint with a new value: %s, previously configured value: %s",
-				oidcConfig.TokenEndpoint, config.DeviceAuthorizationFlow.ProviderConfig.TokenEndpoint)
-			config.DeviceAuthorizationFlow.ProviderConfig.TokenEndpoint = oidcConfig.TokenEndpoint
+				oidcConfig.TokenEndpoint, loadedConfig.DeviceAuthorizationFlow.ProviderConfig.TokenEndpoint)
+			loadedConfig.DeviceAuthorizationFlow.ProviderConfig.TokenEndpoint = oidcConfig.TokenEndpoint
 			log.Infof("overriding DeviceAuthorizationFlow.DeviceAuthEndpoint with a new value: %s, previously configured value: %s",
-				oidcConfig.DeviceAuthEndpoint, config.DeviceAuthorizationFlow.ProviderConfig.DeviceAuthEndpoint)
-			config.DeviceAuthorizationFlow.ProviderConfig.DeviceAuthEndpoint = oidcConfig.DeviceAuthEndpoint
+				oidcConfig.DeviceAuthEndpoint, loadedConfig.DeviceAuthorizationFlow.ProviderConfig.DeviceAuthEndpoint)
+			loadedConfig.DeviceAuthorizationFlow.ProviderConfig.DeviceAuthEndpoint = oidcConfig.DeviceAuthEndpoint
 
 			u, err := url.Parse(oidcEndpoint)
 			if err != nil {
 				return nil, err
 			}
 			log.Infof("overriding DeviceAuthorizationFlow.ProviderConfig.Domain with a new value: %s, previously configured value: %s",
-				u.Host, config.DeviceAuthorizationFlow.ProviderConfig.Domain)
-			config.DeviceAuthorizationFlow.ProviderConfig.Domain = u.Host
+				u.Host, loadedConfig.DeviceAuthorizationFlow.ProviderConfig.Domain)
+			loadedConfig.DeviceAuthorizationFlow.ProviderConfig.Domain = u.Host
 
-			if config.DeviceAuthorizationFlow.ProviderConfig.Scope == "" {
-				config.DeviceAuthorizationFlow.ProviderConfig.Scope = server.DefaultDeviceAuthFlowScope
+			if loadedConfig.DeviceAuthorizationFlow.ProviderConfig.Scope == "" {
+				loadedConfig.DeviceAuthorizationFlow.ProviderConfig.Scope = server.DefaultDeviceAuthFlowScope
 			}
+		}
+
+		if loadedConfig.PKCEAuthorizationFlow != nil {
+			log.Infof("overriding PKCEAuthorizationFlow.TokenEndpoint with a new value: %s, previously configured value: %s",
+				oidcConfig.TokenEndpoint, loadedConfig.PKCEAuthorizationFlow.ProviderConfig.TokenEndpoint)
+			loadedConfig.PKCEAuthorizationFlow.ProviderConfig.TokenEndpoint = oidcConfig.TokenEndpoint
+			log.Infof("overriding PKCEAuthorizationFlow.AuthorizationEndpoint with a new value: %s, previously configured value: %s",
+				oidcConfig.AuthorizationEndpoint, loadedConfig.PKCEAuthorizationFlow.ProviderConfig.AuthorizationEndpoint)
+			loadedConfig.PKCEAuthorizationFlow.ProviderConfig.AuthorizationEndpoint = oidcConfig.AuthorizationEndpoint
 		}
 	}
 
-	return config, err
+	return loadedConfig, err
+}
+
+func updateMgmtConfig(path string, config *server.Config) error {
+	return util.DirectWriteJson(path, config)
 }
 
 // OIDCConfigResponse used for parsing OIDC config response
 type OIDCConfigResponse struct {
-	Issuer             string `json:"issuer"`
-	TokenEndpoint      string `json:"token_endpoint"`
-	DeviceAuthEndpoint string `json:"device_authorization_endpoint"`
-	JwksURI            string `json:"jwks_uri"`
+	Issuer                string `json:"issuer"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	DeviceAuthEndpoint    string `json:"device_authorization_endpoint"`
+	JwksURI               string `json:"jwks_uri"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
 }
 
 // fetchOIDCConfig fetches OIDC configuration from the IDP

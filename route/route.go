@@ -1,8 +1,9 @@
 package route
 
 import (
-	"github.com/netbirdio/netbird/management/server/status"
 	"net/netip"
+
+	"github.com/netbirdio/netbird/management/server/status"
 )
 
 // Windows has some limitation regarding metric size that differ from Unix-like systems.
@@ -64,37 +65,44 @@ func ToPrefixType(prefix string) NetworkType {
 
 // Route represents a route
 type Route struct {
-	ID          string
-	Network     netip.Prefix
+	ID string `gorm:"primaryKey"`
+	// AccountID is a reference to Account that this object belongs
+	AccountID   string       `gorm:"index"`
+	Network     netip.Prefix `gorm:"serializer:gob"`
 	NetID       string
 	Description string
 	Peer        string
+	PeerGroups  []string `gorm:"serializer:gob"`
 	NetworkType NetworkType
 	Masquerade  bool
 	Metric      int
 	Enabled     bool
-	Groups      []string
+	Groups      []string `gorm:"serializer:json"`
 }
 
 // EventMeta returns activity event meta related to the route
 func (r *Route) EventMeta() map[string]any {
-	return map[string]any{"name": r.NetID, "network_range": r.Network.String(), "peer_id": r.Peer}
+	return map[string]any{"name": r.NetID, "network_range": r.Network.String(), "peer_id": r.Peer, "peer_groups": r.PeerGroups}
 }
 
 // Copy copies a route object
 func (r *Route) Copy() *Route {
-	return &Route{
+	route := &Route{
 		ID:          r.ID,
 		Description: r.Description,
 		NetID:       r.NetID,
 		Network:     r.Network,
 		NetworkType: r.NetworkType,
 		Peer:        r.Peer,
+		PeerGroups:  make([]string, len(r.PeerGroups)),
 		Metric:      r.Metric,
 		Masquerade:  r.Masquerade,
 		Enabled:     r.Enabled,
-		Groups:      r.Groups,
+		Groups:      make([]string, len(r.Groups)),
 	}
+	copy(route.Groups, r.Groups)
+	copy(route.PeerGroups, r.PeerGroups)
+	return route
 }
 
 // IsEqual compares one route with the other
@@ -108,7 +116,8 @@ func (r *Route) IsEqual(other *Route) bool {
 		other.Metric == r.Metric &&
 		other.Masquerade == r.Masquerade &&
 		other.Enabled == r.Enabled &&
-		compareGroupsList(r.Groups, other.Groups)
+		compareList(r.Groups, other.Groups) &&
+		compareList(r.PeerGroups, other.PeerGroups)
 }
 
 // ParseNetwork Parses a network prefix string and returns a netip.Prefix object and if is invalid, IPv4 or IPv6
@@ -131,7 +140,7 @@ func ParseNetwork(networkString string) (NetworkType, netip.Prefix, error) {
 	return IPv4Network, masked, nil
 }
 
-func compareGroupsList(list, other []string) bool {
+func compareList(list, other []string) bool {
 	if len(list) != len(other) {
 		return false
 	}

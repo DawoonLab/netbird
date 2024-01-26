@@ -12,6 +12,8 @@ import (
 	"github.com/netbirdio/netbird/route"
 )
 
+const minRangeBits = 7
+
 type routerPeerStatus struct {
 	connected bool
 	relayed   bool
@@ -119,7 +121,7 @@ func (c *clientNetwork) getBestRouteFromStatuses(routePeerStatuses map[string]ro
 		log.Warnf("the network %s has not been assigned a routing peer as no peers from the list %s are currently connected", c.network, peers)
 
 	} else if chosen != currID {
-		log.Infof("new chosen route is %s with peer %s with score %d", chosen, c.routes[chosen].Peer, chosenScore)
+		log.Infof("new chosen route is %s with peer %s with score %d for network %s", chosen, c.routes[chosen].Peer, chosenScore, c.network)
 	}
 
 	return chosen
@@ -155,7 +157,10 @@ func (c *clientNetwork) startPeersStatusChangeWatcher() {
 
 func (c *clientNetwork) removeRouteFromWireguardPeer(peerKey string) error {
 	state, err := c.statusRecorder.GetPeer(peerKey)
-	if err != nil || state.ConnStatus != peer.StatusConnected {
+	if err != nil {
+		return err
+	}
+	if state.ConnStatus != peer.StatusConnected {
 		return nil
 	}
 

@@ -2,11 +2,15 @@ package server
 
 import (
 	_ "embed"
-	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/netbirdio/management-integrations/additions"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/netbirdio/netbird/management/proto"
 	"github.com/netbirdio/netbird/management/server/activity"
+	nbpeer "github.com/netbirdio/netbird/management/server/peer"
 	"github.com/netbirdio/netbird/management/server/status"
 )
 
@@ -41,7 +45,7 @@ const (
 )
 
 const (
-	// PolicyRuleFlowDirect allows trafic from source to destination
+	// PolicyRuleFlowDirect allows traffic from source to destination
 	PolicyRuleFlowDirect = PolicyRuleDirection("direct")
 	// PolicyRuleFlowBidirect allows traffic to both directions
 	PolicyRuleFlowBidirect = PolicyRuleDirection("bidirect")
@@ -61,7 +65,10 @@ type PolicyUpdateOperation struct {
 // PolicyRule is the metadata of the policy
 type PolicyRule struct {
 	// ID of the policy rule
-	ID string
+	ID string `gorm:"primaryKey"`
+
+	// PolicyID is a reference to Policy that this object belongs
+	PolicyID string `json:"-" gorm:"index"`
 
 	// Name of the rule visible in the UI
 	Name string
@@ -76,10 +83,10 @@ type PolicyRule struct {
 	Action PolicyTrafficActionType
 
 	// Destinations policy destination groups
-	Destinations []string
+	Destinations []string `gorm:"serializer:json"`
 
 	// Sources policy source groups
-	Sources []string
+	Sources []string `gorm:"serializer:json"`
 
 	// Bidirectional define if the rule is applicable in both directions, sources, and destinations
 	Bidirectional bool
@@ -88,23 +95,27 @@ type PolicyRule struct {
 	Protocol PolicyRuleProtocolType
 
 	// Ports or it ranges list
-	Ports []string
+	Ports []string `gorm:"serializer:json"`
 }
 
 // Copy returns a copy of a policy rule
 func (pm *PolicyRule) Copy() *PolicyRule {
-	return &PolicyRule{
+	rule := &PolicyRule{
 		ID:            pm.ID,
 		Name:          pm.Name,
 		Description:   pm.Description,
 		Enabled:       pm.Enabled,
 		Action:        pm.Action,
-		Destinations:  pm.Destinations[:],
-		Sources:       pm.Sources[:],
+		Destinations:  make([]string, len(pm.Destinations)),
+		Sources:       make([]string, len(pm.Sources)),
 		Bidirectional: pm.Bidirectional,
 		Protocol:      pm.Protocol,
-		Ports:         pm.Ports[:],
+		Ports:         make([]string, len(pm.Ports)),
 	}
+	copy(rule.Destinations, pm.Destinations)
+	copy(rule.Sources, pm.Sources)
+	copy(rule.Ports, pm.Ports)
+	return rule
 }
 
 // ToRule converts the PolicyRule to a legacy representation of the Rule (for backwards compatibility)
@@ -122,8 +133,11 @@ func (pm *PolicyRule) ToRule() *Rule {
 
 // Policy of the Rego query
 type Policy struct {
-	// ID of the policy
-	ID string
+	// ID of the policy'
+	ID string `gorm:"primaryKey"`
+
+	// AccountID is a reference to Account that this object belongs
+	AccountID string `json:"-" gorm:"index"`
 
 	// Name of the Policy
 	Name string
@@ -135,7 +149,7 @@ type Policy struct {
 	Enabled bool
 
 	// Rules of the policy
-	Rules []*PolicyRule
+	Rules []*PolicyRule `gorm:"foreignKey:PolicyID;references:id"`
 }
 
 // Copy returns a copy of the policy.
@@ -145,9 +159,10 @@ func (p *Policy) Copy() *Policy {
 		Name:        p.Name,
 		Description: p.Description,
 		Enabled:     p.Enabled,
+		Rules:       make([]*PolicyRule, len(p.Rules)),
 	}
-	for _, r := range p.Rules {
-		c.Rules = append(c.Rules, r.Copy())
+	for i, r := range p.Rules {
+		c.Rules[i] = r.Copy()
 	}
 	return c
 }
@@ -192,9 +207,8 @@ type FirewallRule struct {
 // getPeerConnectionResources for a given peer
 //
 // This function returns the list of peers and firewall rules that are applicable to a given peer.
-func (a *Account) getPeerConnectionResources(peerID string) ([]*Peer, []*FirewallRule) {
+func (a *Account) getPeerConnectionResources(peerID string) ([]*nbpeer.Peer, []*FirewallRule) {
 	generateResources, getAccumulatedResources := a.connResourcesGenerator()
-
 	for _, policy := range a.Policies {
 		if !policy.Enabled {
 			continue
@@ -207,6 +221,8 @@ func (a *Account) getPeerConnectionResources(peerID string) ([]*Peer, []*Firewal
 
 			sourcePeers, peerInSources := getAllPeersFromGroups(a, rule.Sources, peerID)
 			destinationPeers, peerInDestinations := getAllPeersFromGroups(a, rule.Destinations, peerID)
+			sourcePeers = additions.ValidatePeers(sourcePeers)
+			destinationPeers = additions.ValidatePeers(destinationPeers)
 
 			if rule.Bidirectional {
 				if peerInSources {
@@ -235,12 +251,20 @@ func (a *Account) getPeerConnectionResources(peerID string) ([]*Peer, []*Firewal
 // The generator function is used to generate the list of peers and firewall rules that are applicable to a given peer.
 // It safe to call the generator function multiple times for same peer and different rules no duplicates will be
 // generated. The accumulator function returns the result of all the generator calls.
-func (a *Account) connResourcesGenerator() (func(*PolicyRule, []*Peer, int), func() ([]*Peer, []*FirewallRule)) {
+func (a *Account) connResourcesGenerator() (func(*PolicyRule, []*nbpeer.Peer, int), func() ([]*nbpeer.Peer, []*FirewallRule)) {
 	rulesExists := make(map[string]struct{})
 	peersExists := make(map[string]struct{})
 	rules := make([]*FirewallRule, 0)
-	peers := make([]*Peer, 0)
-	return func(rule *PolicyRule, groupPeers []*Peer, direction int) {
+	peers := make([]*nbpeer.Peer, 0)
+
+	all, err := a.GetGroupAll()
+	if err != nil {
+		log.Errorf("failed to get group all: %v", err)
+		all = &Group{}
+	}
+
+	return func(rule *PolicyRule, groupPeers []*nbpeer.Peer, direction int) {
+			isAll := (len(all.Peers) - 1) == len(groupPeers)
 			for _, peer := range groupPeers {
 				if peer == nil {
 					continue
@@ -250,32 +274,36 @@ func (a *Account) connResourcesGenerator() (func(*PolicyRule, []*Peer, int), fun
 					peersExists[peer.ID] = struct{}{}
 				}
 
-				fwRule := FirewallRule{
+				fr := FirewallRule{
 					PeerIP:    peer.IP.String(),
 					Direction: direction,
 					Action:    string(rule.Action),
 					Protocol:  string(rule.Protocol),
 				}
 
-				ruleID := fmt.Sprintf("%s%d", peer.ID+peer.IP.String(), direction)
-				ruleID += string(rule.Protocol) + string(rule.Action) + strings.Join(rule.Ports, ",")
+				if isAll {
+					fr.PeerIP = "0.0.0.0"
+				}
+
+				ruleID := (rule.ID + fr.PeerIP + strconv.Itoa(direction) +
+					fr.Protocol + fr.Action + strings.Join(rule.Ports, ","))
 				if _, ok := rulesExists[ruleID]; ok {
 					continue
 				}
 				rulesExists[ruleID] = struct{}{}
 
 				if len(rule.Ports) == 0 {
-					rules = append(rules, &fwRule)
+					rules = append(rules, &fr)
 					continue
 				}
 
 				for _, port := range rule.Ports {
-					addRule := fwRule
-					addRule.Port = port
-					rules = append(rules, &addRule)
+					pr := fr // clone rule and add set new port
+					pr.Port = port
+					rules = append(rules, &pr)
 				}
 			}
-		}, func() ([]*Peer, []*FirewallRule) {
+		}, func() ([]*nbpeer.Peer, []*FirewallRule) {
 			return peers, rules
 		}
 }
@@ -295,8 +323,8 @@ func (am *DefaultAccountManager) GetPolicy(accountID, policyID, userID string) (
 		return nil, err
 	}
 
-	if !user.IsAdmin() {
-		return nil, status.Errorf(status.PermissionDenied, "only admins are allowed to view policies")
+	if !(user.HasAdminPower() || user.IsServiceUser) {
+		return nil, status.Errorf(status.PermissionDenied, "only users with admin power are allowed to view policies")
 	}
 
 	for _, policy := range account.Policies {
@@ -329,9 +357,11 @@ func (am *DefaultAccountManager) SavePolicy(accountID, userID string, policy *Po
 	if exists {
 		action = activity.PolicyUpdated
 	}
-	am.storeEvent(userID, policy.ID, accountID, action, policy.EventMeta())
+	am.StoreEvent(userID, policy.ID, accountID, action, policy.EventMeta())
 
-	return am.updateAccountPeers(account)
+	am.updateAccountPeers(account)
+
+	return nil
 }
 
 // DeletePolicy from the store
@@ -354,9 +384,11 @@ func (am *DefaultAccountManager) DeletePolicy(accountID, policyID, userID string
 		return err
 	}
 
-	am.storeEvent(userID, policy.ID, accountID, activity.PolicyRemoved, policy.EventMeta())
+	am.StoreEvent(userID, policy.ID, accountID, activity.PolicyRemoved, policy.EventMeta())
 
-	return am.updateAccountPeers(account)
+	am.updateAccountPeers(account)
+
+	return nil
 }
 
 // ListPolicies from the store
@@ -374,11 +406,11 @@ func (am *DefaultAccountManager) ListPolicies(accountID, userID string) ([]*Poli
 		return nil, err
 	}
 
-	if !user.IsAdmin() {
-		return nil, status.Errorf(status.PermissionDenied, "Only Administrators can view policies")
+	if !(user.HasAdminPower() || user.IsServiceUser) {
+		return nil, status.Errorf(status.PermissionDenied, "only users with admin power can view policies")
 	}
 
-	return account.Policies[:], nil
+	return account.Policies, nil
 }
 
 func (am *DefaultAccountManager) deletePolicy(account *Account, policyID string) (*Policy, error) {
@@ -450,9 +482,9 @@ func toProtocolFirewallRules(update []*FirewallRule) []*proto.FirewallRule {
 // getAllPeersFromGroups for given peer ID and list of groups
 //
 // Returns list of peers and boolean indicating if peer is in any of the groups
-func getAllPeersFromGroups(account *Account, groups []string, peerID string) ([]*Peer, bool) {
+func getAllPeersFromGroups(account *Account, groups []string, peerID string) ([]*nbpeer.Peer, bool) {
 	peerInGroups := false
-	filteredPeers := make([]*Peer, 0, len(groups))
+	filteredPeers := make([]*nbpeer.Peer, 0, len(groups))
 	for _, g := range groups {
 		group, ok := account.Groups[g]
 		if !ok {
@@ -461,7 +493,11 @@ func getAllPeersFromGroups(account *Account, groups []string, peerID string) ([]
 
 		for _, p := range group.Peers {
 			peer, ok := account.Peers[p]
-			if ok && peer != nil && peer.ID == peerID {
+			if !ok || peer == nil {
+				continue
+			}
+
+			if peer.ID == peerID {
 				peerInGroups = true
 				continue
 			}

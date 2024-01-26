@@ -54,28 +54,30 @@ var baseExistingNSGroup = &nbdns.NameServerGroup{
 		},
 	},
 	Groups:  []string{"testing"},
+	Domains: []string{"domain"},
 	Enabled: true,
 }
 
 func initNameserversTestData() *NameserversHandler {
 	return &NameserversHandler{
 		accountManager: &mock_server.MockAccountManager{
-			GetNameServerGroupFunc: func(accountID, nsGroupID string) (*nbdns.NameServerGroup, error) {
+			GetNameServerGroupFunc: func(accountID, userID, nsGroupID string) (*nbdns.NameServerGroup, error) {
 				if nsGroupID == existingNSGroupID {
 					return baseExistingNSGroup.Copy(), nil
 				}
 				return nil, status.Errorf(status.NotFound, "nameserver group with ID %s not found", nsGroupID)
 			},
-			CreateNameServerGroupFunc: func(accountID string, name, description string, nameServerList []nbdns.NameServer, groups []string, primary bool, domains []string, enabled bool, _ string) (*nbdns.NameServerGroup, error) {
+			CreateNameServerGroupFunc: func(accountID string, name, description string, nameServerList []nbdns.NameServer, groups []string, primary bool, domains []string, enabled bool, _ string, searchDomains bool) (*nbdns.NameServerGroup, error) {
 				return &nbdns.NameServerGroup{
-					ID:          existingNSGroupID,
-					Name:        name,
-					Description: description,
-					NameServers: nameServerList,
-					Groups:      groups,
-					Enabled:     enabled,
-					Primary:     primary,
-					Domains:     domains,
+					ID:                   existingNSGroupID,
+					Name:                 name,
+					Description:          description,
+					NameServers:          nameServerList,
+					Groups:               groups,
+					Enabled:              enabled,
+					Primary:              primary,
+					Domains:              domains,
+					SearchDomainsEnabled: searchDomains,
 				}, nil
 			},
 			DeleteNameServerGroupFunc: func(accountID, nsGroupID, _ string) error {
@@ -86,31 +88,6 @@ func initNameserversTestData() *NameserversHandler {
 					return nil
 				}
 				return status.Errorf(status.NotFound, "nameserver group with ID %s was not found", nsGroupToSave.ID)
-			},
-			UpdateNameServerGroupFunc: func(accountID, nsGroupID, _ string, operations []server.NameServerGroupUpdateOperation) (*nbdns.NameServerGroup, error) {
-				nsGroupToUpdate := baseExistingNSGroup.Copy()
-				if nsGroupID != nsGroupToUpdate.ID {
-					return nil, status.Errorf(status.NotFound, "nameserver group ID %s no longer exists", nsGroupID)
-				}
-				for _, operation := range operations {
-					switch operation.Type {
-					case server.UpdateNameServerGroupName:
-						nsGroupToUpdate.Name = operation.Values[0]
-					case server.UpdateNameServerGroupDescription:
-						nsGroupToUpdate.Description = operation.Values[0]
-					case server.UpdateNameServerGroupNameServers:
-						var parsedNSList []nbdns.NameServer
-						for _, nsURL := range operation.Values {
-							parsed, err := nbdns.ParseNameServerURL(nsURL)
-							if err != nil {
-								return nil, err
-							}
-							parsedNSList = append(parsedNSList, parsed)
-						}
-						nsGroupToUpdate.NameServers = parsedNSList
-					}
-				}
-				return nsGroupToUpdate, nil
 			},
 			GetAccountFromTokenFunc: func(_ jwtclaims.AuthorizationClaims) (*server.Account, *server.User, error) {
 				return testingNSAccount, testingAccount.Users["test_user"], nil

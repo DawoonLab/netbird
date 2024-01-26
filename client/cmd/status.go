@@ -22,14 +22,18 @@ import (
 )
 
 type peerStateDetailOutput struct {
-	FQDN             string           `json:"fqdn" yaml:"fqdn"`
-	IP               string           `json:"netbirdIp" yaml:"netbirdIp"`
-	PubKey           string           `json:"publicKey" yaml:"publicKey"`
-	Status           string           `json:"status" yaml:"status"`
-	LastStatusUpdate time.Time        `json:"lastStatusUpdate" yaml:"lastStatusUpdate"`
-	ConnType         string           `json:"connectionType" yaml:"connectionType"`
-	Direct           bool             `json:"direct" yaml:"direct"`
-	IceCandidateType iceCandidateType `json:"iceCandidateType" yaml:"iceCandidateType"`
+	FQDN                   string           `json:"fqdn" yaml:"fqdn"`
+	IP                     string           `json:"netbirdIp" yaml:"netbirdIp"`
+	PubKey                 string           `json:"publicKey" yaml:"publicKey"`
+	Status                 string           `json:"status" yaml:"status"`
+	LastStatusUpdate       time.Time        `json:"lastStatusUpdate" yaml:"lastStatusUpdate"`
+	ConnType               string           `json:"connectionType" yaml:"connectionType"`
+	Direct                 bool             `json:"direct" yaml:"direct"`
+	IceCandidateType       iceCandidateType `json:"iceCandidateType" yaml:"iceCandidateType"`
+	IceCandidateEndpoint   iceCandidateType `json:"iceCandidateEndpoint" yaml:"iceCandidateEndpoint"`
+	LastWireguardHandshake time.Time        `json:"lastWireguardHandshake" yaml:"lastWireguardHandshake"`
+	TransferReceived       int64            `json:"transferReceived" yaml:"transferReceived"`
+	TransferSent           int64            `json:"transferSent" yaml:"transferSent"`
 }
 
 type peersStateOutput struct {
@@ -41,11 +45,25 @@ type peersStateOutput struct {
 type signalStateOutput struct {
 	URL       string `json:"url" yaml:"url"`
 	Connected bool   `json:"connected" yaml:"connected"`
+	Error     string `json:"error" yaml:"error"`
 }
 
 type managementStateOutput struct {
 	URL       string `json:"url" yaml:"url"`
 	Connected bool   `json:"connected" yaml:"connected"`
+	Error     string `json:"error" yaml:"error"`
+}
+
+type relayStateOutputDetail struct {
+	URI       string `json:"uri" yaml:"uri"`
+	Available bool   `json:"available" yaml:"available"`
+	Error     string `json:"error" yaml:"error"`
+}
+
+type relayStateOutput struct {
+	Total     int                      `json:"total" yaml:"total"`
+	Available int                      `json:"available" yaml:"available"`
+	Details   []relayStateOutputDetail `json:"details" yaml:"details"`
 }
 
 type iceCandidateType struct {
@@ -59,6 +77,7 @@ type statusOutputOverview struct {
 	DaemonVersion   string                `json:"daemonVersion" yaml:"daemonVersion"`
 	ManagementState managementStateOutput `json:"management" yaml:"management"`
 	SignalState     signalStateOutput     `json:"signal" yaml:"signal"`
+	Relays          relayStateOutput      `json:"relays" yaml:"relays"`
 	IP              string                `json:"netbirdIp" yaml:"netbirdIp"`
 	PubKey          string                `json:"publicKey" yaml:"publicKey"`
 	KernelInterface bool                  `json:"usesKernelInterface" yaml:"usesKernelInterface"`
@@ -66,13 +85,15 @@ type statusOutputOverview struct {
 }
 
 var (
-	detailFlag   bool
-	ipv4Flag     bool
-	jsonFlag     bool
-	yamlFlag     bool
-	ipsFilter    []string
-	statusFilter string
-	ipsFilterMap map[string]struct{}
+	detailFlag           bool
+	ipv4Flag             bool
+	jsonFlag             bool
+	yamlFlag             bool
+	ipsFilter            []string
+	prefixNamesFilter    []string
+	statusFilter         string
+	ipsFilterMap         map[string]struct{}
+	prefixNamesFilterMap map[string]struct{}
 )
 
 var statusCmd = &cobra.Command{
@@ -83,12 +104,14 @@ var statusCmd = &cobra.Command{
 
 func init() {
 	ipsFilterMap = make(map[string]struct{})
+	prefixNamesFilterMap = make(map[string]struct{})
 	statusCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "d", false, "display detailed status information in human-readable format")
 	statusCmd.PersistentFlags().BoolVar(&jsonFlag, "json", false, "display detailed status information in json format")
 	statusCmd.PersistentFlags().BoolVar(&yamlFlag, "yaml", false, "display detailed status information in yaml format")
 	statusCmd.PersistentFlags().BoolVar(&ipv4Flag, "ipv4", false, "display only NetBird IPv4 of this peer, e.g., --ipv4 will output 100.64.0.33")
 	statusCmd.MarkFlagsMutuallyExclusive("detail", "json", "yaml", "ipv4")
 	statusCmd.PersistentFlags().StringSliceVar(&ipsFilter, "filter-by-ips", []string{}, "filters the detailed output by a list of one or more IPs, e.g., --filter-by-ips 100.64.0.100,100.64.0.200")
+	statusCmd.PersistentFlags().StringSliceVar(&prefixNamesFilter, "filter-by-names", []string{}, "filters the detailed output by a list of one or more peer FQDN or hostnames, e.g., --filter-by-names peer-a,peer-b.netbird.cloud")
 	statusCmd.PersistentFlags().StringVar(&statusFilter, "filter-by-status", "", "filters the detailed output by connection status(connected|disconnected), e.g., --filter-by-status connected")
 }
 
@@ -109,9 +132,9 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 
 	ctx := internal.CtxInitState(context.Background())
 
-	resp, _ := getStatus(ctx, cmd)
+	resp, err := getStatus(ctx, cmd)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if resp.GetStatus() == string(internal.StatusNeedsLogin) || resp.GetStatus() == string(internal.StatusLoginFailed) {
@@ -120,7 +143,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 			" netbird up \n\n"+
 			"If you are running a self-hosted version and no SSO provider has been configured in your Management Server,\n"+
 			"you can use a setup-key:\n\n netbird up --management-url <YOUR_MANAGEMENT_URL> --setup-key <YOUR_SETUP_KEY>\n\n"+
-			"More info: https://www.netbird.io/docs/overview/setup-keys\n\n",
+			"More info: https://docs.netbird.io/how-to/register-machines-using-setup-keys\n\n",
 			resp.GetStatus(),
 		)
 		return nil
@@ -133,7 +156,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 
 	outputInformationHolder := convertToStatusOutputOverview(resp)
 
-	statusOutputString := ""
+	var statusOutputString string
 	switch {
 	case detailFlag:
 		statusOutputString = parseToFullDetailSummary(outputInformationHolder)
@@ -142,7 +165,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 	case yamlFlag:
 		statusOutputString, err = parseToYAML(outputInformationHolder)
 	default:
-		statusOutputString = parseGeneralSummary(outputInformationHolder, false)
+		statusOutputString = parseGeneralSummary(outputInformationHolder, false, false)
 	}
 
 	if err != nil {
@@ -172,8 +195,12 @@ func getStatus(ctx context.Context, cmd *cobra.Command) (*proto.StatusResponse, 
 }
 
 func parseFilters() error {
+
 	switch strings.ToLower(statusFilter) {
 	case "", "disconnected", "connected":
+		if strings.ToLower(statusFilter) != "" {
+			enableDetailFlagWhenFilterFlag()
+		}
 	default:
 		return fmt.Errorf("wrong status filter, should be one of connected|disconnected, got: %s", statusFilter)
 	}
@@ -185,9 +212,24 @@ func parseFilters() error {
 				return fmt.Errorf("got an invalid IP address in the filter: address %s, error %s", addr, err)
 			}
 			ipsFilterMap[addr] = struct{}{}
+			enableDetailFlagWhenFilterFlag()
 		}
 	}
+
+	if len(prefixNamesFilter) > 0 {
+		for _, name := range prefixNamesFilter {
+			prefixNamesFilterMap[strings.ToLower(name)] = struct{}{}
+		}
+		enableDetailFlagWhenFilterFlag()
+	}
+
 	return nil
+}
+
+func enableDetailFlagWhenFilterFlag() {
+	if !detailFlag && !jsonFlag && !yamlFlag {
+		detailFlag = true
+	}
 }
 
 func convertToStatusOutputOverview(resp *proto.StatusResponse) statusOutputOverview {
@@ -197,14 +239,17 @@ func convertToStatusOutputOverview(resp *proto.StatusResponse) statusOutputOverv
 	managementOverview := managementStateOutput{
 		URL:       managementState.GetURL(),
 		Connected: managementState.GetConnected(),
+		Error:     managementState.Error,
 	}
 
 	signalState := pbFullStatus.GetSignalState()
 	signalOverview := signalStateOutput{
 		URL:       signalState.GetURL(),
 		Connected: signalState.GetConnected(),
+		Error:     signalState.Error,
 	}
 
+	relayOverview := mapRelays(pbFullStatus.GetRelays())
 	peersOverview := mapPeers(resp.GetFullStatus().GetPeers())
 
 	overview := statusOutputOverview{
@@ -213,6 +258,7 @@ func convertToStatusOutputOverview(resp *proto.StatusResponse) statusOutputOverv
 		DaemonVersion:   resp.GetDaemonVersion(),
 		ManagementState: managementOverview,
 		SignalState:     signalOverview,
+		Relays:          relayOverview,
 		IP:              pbFullStatus.GetLocalPeerState().GetIP(),
 		PubKey:          pbFullStatus.GetLocalPeerState().GetPubKey(),
 		KernelInterface: pbFullStatus.GetLocalPeerState().GetKernelInterface(),
@@ -222,26 +268,62 @@ func convertToStatusOutputOverview(resp *proto.StatusResponse) statusOutputOverv
 	return overview
 }
 
+func mapRelays(relays []*proto.RelayState) relayStateOutput {
+	var relayStateDetail []relayStateOutputDetail
+
+	var relaysAvailable int
+	for _, relay := range relays {
+		available := relay.GetAvailable()
+		relayStateDetail = append(relayStateDetail,
+			relayStateOutputDetail{
+				URI:       relay.URI,
+				Available: available,
+				Error:     relay.GetError(),
+			},
+		)
+
+		if available {
+			relaysAvailable++
+		}
+	}
+
+	return relayStateOutput{
+		Total:     len(relays),
+		Available: relaysAvailable,
+		Details:   relayStateDetail,
+	}
+}
+
 func mapPeers(peers []*proto.PeerState) peersStateOutput {
 	var peersStateDetail []peerStateDetailOutput
 	localICE := ""
 	remoteICE := ""
+	localICEEndpoint := ""
+	remoteICEEndpoint := ""
 	connType := ""
 	peersConnected := 0
+	lastHandshake := time.Time{}
+	transferReceived := int64(0)
+	transferSent := int64(0)
 	for _, pbPeerState := range peers {
 		isPeerConnected := pbPeerState.ConnStatus == peer.StatusConnected.String()
 		if skipDetailByFilters(pbPeerState, isPeerConnected) {
 			continue
 		}
 		if isPeerConnected {
-			peersConnected = peersConnected + 1
+			peersConnected++
 
 			localICE = pbPeerState.GetLocalIceCandidateType()
 			remoteICE = pbPeerState.GetRemoteIceCandidateType()
+			localICEEndpoint = pbPeerState.GetLocalIceCandidateEndpoint()
+			remoteICEEndpoint = pbPeerState.GetRemoteIceCandidateEndpoint()
 			connType = "P2P"
 			if pbPeerState.Relayed {
 				connType = "Relayed"
 			}
+			lastHandshake = pbPeerState.GetLastWireguardHandshake().AsTime().Local()
+			transferReceived = pbPeerState.GetBytesRx()
+			transferSent = pbPeerState.GetBytesTx()
 		}
 
 		timeLocal := pbPeerState.GetConnStatusUpdate().AsTime().Local()
@@ -256,7 +338,14 @@ func mapPeers(peers []*proto.PeerState) peersStateOutput {
 				Local:  localICE,
 				Remote: remoteICE,
 			},
-			FQDN: pbPeerState.GetFqdn(),
+			IceCandidateEndpoint: iceCandidateType{
+				Local:  localICEEndpoint,
+				Remote: remoteICEEndpoint,
+			},
+			FQDN:                   pbPeerState.GetFqdn(),
+			LastWireguardHandshake: lastHandshake,
+			TransferReceived:       transferReceived,
+			TransferSent:           transferSent,
 		}
 
 		peersStateDetail = append(peersStateDetail, peerState)
@@ -306,21 +395,31 @@ func parseToYAML(overview statusOutputOverview) (string, error) {
 	return string(yamlBytes), nil
 }
 
-func parseGeneralSummary(overview statusOutputOverview, showURL bool) string {
+func parseGeneralSummary(overview statusOutputOverview, showURL bool, showRelays bool) string {
 
-	managementConnString := "Disconnected"
+	var managementConnString string
 	if overview.ManagementState.Connected {
 		managementConnString = "Connected"
 		if showURL {
 			managementConnString = fmt.Sprintf("%s to %s", managementConnString, overview.ManagementState.URL)
 		}
+	} else {
+		managementConnString = "Disconnected"
+		if overview.ManagementState.Error != "" {
+			managementConnString = fmt.Sprintf("%s, reason: %s", managementConnString, overview.ManagementState.Error)
+		}
 	}
 
-	signalConnString := "Disconnected"
+	var signalConnString string
 	if overview.SignalState.Connected {
 		signalConnString = "Connected"
 		if showURL {
 			signalConnString = fmt.Sprintf("%s to %s", signalConnString, overview.SignalState.URL)
+		}
+	} else {
+		signalConnString = "Disconnected"
+		if overview.SignalState.Error != "" {
+			signalConnString = fmt.Sprintf("%s, reason: %s", signalConnString, overview.SignalState.Error)
 		}
 	}
 
@@ -333,6 +432,23 @@ func parseGeneralSummary(overview statusOutputOverview, showURL bool) string {
 		interfaceIP = "N/A"
 	}
 
+	var relayAvailableString string
+	if showRelays {
+		for _, relay := range overview.Relays.Details {
+			available := "Available"
+			reason := ""
+			if !relay.Available {
+				available = "Unavailable"
+				reason = fmt.Sprintf(", reason: %s", relay.Error)
+			}
+			relayAvailableString += fmt.Sprintf("\n  [%s] is %s%s", relay.URI, available, reason)
+
+		}
+	} else {
+
+		relayAvailableString = fmt.Sprintf("%d/%d Available", overview.Relays.Available, overview.Relays.Total)
+	}
+
 	peersCountString := fmt.Sprintf("%d/%d Connected", overview.Peers.Connected, overview.Peers.Total)
 
 	summary := fmt.Sprintf(
@@ -340,6 +456,7 @@ func parseGeneralSummary(overview statusOutputOverview, showURL bool) string {
 			"CLI version: %s\n"+
 			"Management: %s\n"+
 			"Signal: %s\n"+
+			"Relays: %s\n"+
 			"FQDN: %s\n"+
 			"NetBird IP: %s\n"+
 			"Interface type: %s\n"+
@@ -348,6 +465,7 @@ func parseGeneralSummary(overview statusOutputOverview, showURL bool) string {
 		version.NetbirdVersion(),
 		managementConnString,
 		signalConnString,
+		relayAvailableString,
 		overview.FQDN,
 		interfaceIP,
 		interfaceTypeString,
@@ -358,7 +476,7 @@ func parseGeneralSummary(overview statusOutputOverview, showURL bool) string {
 
 func parseToFullDetailSummary(overview statusOutputOverview) string {
 	parsedPeersString := parsePeers(overview.Peers)
-	summary := parseGeneralSummary(overview, true)
+	summary := parseGeneralSummary(overview, true, true)
 
 	return fmt.Sprintf(
 		"Peers detail:"+
@@ -386,6 +504,25 @@ func parsePeers(peers peersStateOutput) string {
 			remoteICE = peerState.IceCandidateType.Remote
 		}
 
+		localICEEndpoint := "-"
+		if peerState.IceCandidateEndpoint.Local != "" {
+			localICEEndpoint = peerState.IceCandidateEndpoint.Local
+		}
+
+		remoteICEEndpoint := "-"
+		if peerState.IceCandidateEndpoint.Remote != "" {
+			remoteICEEndpoint = peerState.IceCandidateEndpoint.Remote
+		}
+		lastStatusUpdate := "-"
+		if !peerState.LastStatusUpdate.IsZero() {
+			lastStatusUpdate = peerState.LastStatusUpdate.Format("2006-01-02 15:04:05")
+		}
+
+		lastWireguardHandshake := "-"
+		if !peerState.LastWireguardHandshake.IsZero() && peerState.LastWireguardHandshake != time.Unix(0, 0) {
+			lastWireguardHandshake = peerState.LastWireguardHandshake.Format("2006-01-02 15:04:05")
+		}
+
 		peerString := fmt.Sprintf(
 			"\n %s:\n"+
 				"  NetBird IP: %s\n"+
@@ -395,7 +532,10 @@ func parsePeers(peers peersStateOutput) string {
 				"  Connection type: %s\n"+
 				"  Direct: %t\n"+
 				"  ICE candidate (Local/Remote): %s/%s\n"+
-				"  Last connection update: %s\n",
+				"  ICE candidate endpoints (Local/Remote): %s/%s\n"+
+				"  Last connection update: %s\n"+
+				"  Last Wireguard handshake: %s\n"+
+				"  Transfer status (received/sent) %s/%s\n",
 			peerState.FQDN,
 			peerState.IP,
 			peerState.PubKey,
@@ -404,10 +544,15 @@ func parsePeers(peers peersStateOutput) string {
 			peerState.Direct,
 			localICE,
 			remoteICE,
-			peerState.LastStatusUpdate.Format("2006-01-02 15:04:05"),
+			localICEEndpoint,
+			remoteICEEndpoint,
+			lastStatusUpdate,
+			lastWireguardHandshake,
+			toIEC(peerState.TransferReceived),
+			toIEC(peerState.TransferSent),
 		)
 
-		peersString = peersString + peerString
+		peersString += peerString
 	}
 	return peersString
 }
@@ -415,6 +560,7 @@ func parsePeers(peers peersStateOutput) string {
 func skipDetailByFilters(peerState *proto.PeerState, isConnected bool) bool {
 	statusEval := false
 	ipEval := false
+	nameEval := false
 
 	if statusFilter != "" {
 		lowerStatusFilter := strings.ToLower(statusFilter)
@@ -431,5 +577,29 @@ func skipDetailByFilters(peerState *proto.PeerState, isConnected bool) bool {
 			ipEval = true
 		}
 	}
-	return statusEval || ipEval
+
+	if len(prefixNamesFilter) > 0 {
+		for prefixNameFilter := range prefixNamesFilterMap {
+			if !strings.HasPrefix(peerState.Fqdn, prefixNameFilter) {
+				nameEval = true
+				break
+			}
+		}
+	}
+
+	return statusEval || ipEval || nameEval
+}
+
+func toIEC(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB",
+		float64(b)/float64(div), "KMGTPE"[exp])
 }

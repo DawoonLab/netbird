@@ -65,6 +65,7 @@ func (mc *mockAuth0Credentials) Authenticate() (JWTToken, error) {
 }
 
 func newTestJWT(t *testing.T, expInt int) string {
+	t.Helper()
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iat": now.Unix(),
@@ -133,6 +134,7 @@ func TestAuth0_RequestJWTToken(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			defer res.Body.Close()
 			body, err := io.ReadAll(res.Body)
 			assert.NoError(t, err, "unable to read the response body")
 
@@ -343,7 +345,7 @@ func TestAuth0_UpdateUserAppMetadata(t *testing.T) {
 	updateUserAppMetadataTestCase2 := updateUserAppMetadataTest{
 		name:            "Bad Status Code",
 		inputReqBody:    fmt.Sprintf("{\"access_token\":\"%s\",\"scope\":\"read:users\",\"expires_in\":%d,\"token_type\":\"Bearer\"}", token, exp),
-		expectedReqBody: fmt.Sprintf("{\"app_metadata\":{\"wt_account_id\":\"%s\",\"wt_pending_invite\":null}}", appMetadata.WTAccountID),
+		expectedReqBody: fmt.Sprintf("{\"app_metadata\":{\"wt_account_id\":\"%s\"}}", appMetadata.WTAccountID),
 		appMetadata:     appMetadata,
 		statusCode:      400,
 		helper:          JsonParser{},
@@ -366,7 +368,7 @@ func TestAuth0_UpdateUserAppMetadata(t *testing.T) {
 	updateUserAppMetadataTestCase4 := updateUserAppMetadataTest{
 		name:                 "Good request",
 		inputReqBody:         fmt.Sprintf("{\"access_token\":\"%s\",\"scope\":\"read:users\",\"expires_in\":%d,\"token_type\":\"Bearer\"}", token, exp),
-		expectedReqBody:      fmt.Sprintf("{\"app_metadata\":{\"wt_account_id\":\"%s\",\"wt_pending_invite\":null}}", appMetadata.WTAccountID),
+		expectedReqBody:      fmt.Sprintf("{\"app_metadata\":{\"wt_account_id\":\"%s\"}}", appMetadata.WTAccountID),
 		appMetadata:          appMetadata,
 		statusCode:           200,
 		helper:               JsonParser{},

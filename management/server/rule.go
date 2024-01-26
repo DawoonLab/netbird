@@ -25,6 +25,9 @@ type Rule struct {
 	// ID of the rule
 	ID string
 
+	// AccountID is a reference to Account that this object belongs
+	AccountID string `json:"-" gorm:"index"`
+
 	// Name of the rule visible in the UI
 	Name string
 
@@ -35,25 +38,28 @@ type Rule struct {
 	Disabled bool
 
 	// Source list of groups IDs of peers
-	Source []string
+	Source []string `gorm:"serializer:json"`
 
 	// Destination list of groups IDs of peers
-	Destination []string
+	Destination []string `gorm:"serializer:json"`
 
 	// Flow of the traffic allowed by the rule
 	Flow TrafficFlowType
 }
 
 func (r *Rule) Copy() *Rule {
-	return &Rule{
+	rule := &Rule{
 		ID:          r.ID,
 		Name:        r.Name,
 		Description: r.Description,
 		Disabled:    r.Disabled,
-		Source:      r.Source[:],
-		Destination: r.Destination[:],
+		Source:      make([]string, len(r.Source)),
+		Destination: make([]string, len(r.Destination)),
 		Flow:        r.Flow,
 	}
+	copy(rule.Source, r.Source)
+	copy(rule.Destination, r.Destination)
+	return rule
 }
 
 // EventMeta returns activity event meta related to this rule

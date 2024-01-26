@@ -13,7 +13,12 @@ import (
 	"github.com/netbirdio/netbird/management/server/status"
 )
 
-// WriteJSONObject simply writes object to the HTTP reponse in JSON format
+type ErrorResponse struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
+// WriteJSONObject simply writes object to the HTTP response in JSON format
 func WriteJSONObject(w http.ResponseWriter, obj interface{}) {
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
@@ -58,14 +63,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // WriteErrorResponse prepares and writes an error response i nJSON
 func WriteErrorResponse(errMsg string, httpStatus int, w http.ResponseWriter) {
-	type errorResponse struct {
-		Message string `json:"message"`
-		Code    int    `json:"code"`
-	}
-
 	w.WriteHeader(httpStatus)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	err := json.NewEncoder(w).Encode(&errorResponse{
+	err := json.NewEncoder(w).Encode(&ErrorResponse{
 		Message: errMsg,
 		Code:    httpStatus,
 	})
@@ -77,6 +77,7 @@ func WriteErrorResponse(errMsg string, httpStatus int, w http.ResponseWriter) {
 // WriteError converts an error to an JSON error response.
 // If it is known internal error of type server.Error then it sets the messages from the error, a generic message otherwise
 func WriteError(err error, w http.ResponseWriter) {
+	log.Errorf("got a handler error: %s", err.Error())
 	errStatus, ok := status.FromError(err)
 	httpStatus := http.StatusInternalServerError
 	msg := "internal server error"

@@ -28,7 +28,7 @@ const defaultSendTimeout = 5 * time.Second
 
 // ConnStateNotifier is a wrapper interface of the status recorder
 type ConnStateNotifier interface {
-	MarkSignalDisconnected()
+	MarkSignalDisconnected(error)
 	MarkSignalConnected()
 }
 
@@ -79,7 +79,7 @@ func NewClient(ctx context.Context, addr string, key wgtypes.Key, tlsEnabled boo
 		transportOption,
 		grpc.WithBlock(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:    15 * time.Second,
+			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
 		}))
 
@@ -166,7 +166,7 @@ func (c *GrpcClient) Receive(msgHandler func(msg *proto.Message) error) error {
 			// we need this reset because after a successful connection and a consequent error, backoff lib doesn't
 			// reset times and next try will start with a long delay
 			backOff.Reset()
-			c.notifyDisconnected()
+			c.notifyDisconnected(err)
 			log.Warnf("disconnected from the Signal service but will retry silently. Reason: %v", err)
 			return err
 		}
@@ -238,6 +238,35 @@ func (c *GrpcClient) Ready() bool {
 	return c.signalConn.GetState() == connectivity.Ready || c.signalConn.GetState() == connectivity.Idle
 }
 
+// IsHealthy probes the gRPC connection and returns false on errors
+func (c *GrpcClient) IsHealthy() bool {
+	switch c.signalConn.GetState() {
+	case connectivity.TransientFailure:
+		return false
+	case connectivity.Connecting:
+		return true
+	case connectivity.Shutdown:
+		return true
+	case connectivity.Idle:
+	case connectivity.Ready:
+	}
+
+	ctx, cancel := context.WithTimeout(c.ctx, 1*time.Second)
+	defer cancel()
+	_, err := c.realClient.Send(ctx, &proto.EncryptedMessage{
+		Key:       c.key.PublicKey().String(),
+		RemoteKey: "dummy",
+		Body:      nil,
+	})
+	if err != nil {
+		c.notifyDisconnected(err)
+		log.Warnf("health check returned: %s", err)
+		return false
+	}
+	c.notifyConnected()
+	return true
+}
+
 // WaitStreamConnected waits until the client is connected to the Signal stream
 func (c *GrpcClient) WaitStreamConnected() {
 
@@ -260,7 +289,7 @@ func (c *GrpcClient) SendToStream(msg *proto.EncryptedMessage) error {
 		return fmt.Errorf("no connection to signal")
 	}
 	if c.stream == nil {
-		return fmt.Errorf("connection to the Signal Exchnage has not been established yet. Please call GrpcClient.Receive before sending messages")
+		return fmt.Errorf("connection to the Signal Exchange has not been established yet. Please call GrpcClient.Receive before sending messages")
 	}
 
 	err := c.stream.Send(msg)
@@ -354,16 +383,17 @@ func (c *GrpcClient) receive(stream proto.SignalExchange_ConnectStreamClient,
 
 	for {
 		msg, err := stream.Recv()
-		if s, ok := status.FromError(err); ok && s.Code() == codes.Canceled {
+		switch s, ok := status.FromError(err); {
+		case ok && s.Code() == codes.Canceled:
 			log.Debugf("stream canceled (usually indicates shutdown)")
 			return err
-		} else if s.Code() == codes.Unavailable {
+		case s.Code() == codes.Unavailable:
 			log.Debugf("Signal Service is unavailable")
 			return err
-		} else if err == io.EOF {
+		case err == io.EOF:
 			log.Debugf("Signal Service stream closed by server")
 			return err
-		} else if err != nil {
+		case err != nil:
 			return err
 		}
 		log.Tracef("received a new message from Peer [fingerprint: %s]", msg.Key)
@@ -382,14 +412,14 @@ func (c *GrpcClient) receive(stream proto.SignalExchange_ConnectStreamClient,
 	}
 }
 
-func (c *GrpcClient) notifyDisconnected() {
+func (c *GrpcClient) notifyDisconnected(err error) {
 	c.connStateCallbackLock.RLock()
 	defer c.connStateCallbackLock.RUnlock()
 
 	if c.connStateCallback == nil {
 		return
 	}
-	c.connStateCallback.MarkSignalDisconnected()
+	c.connStateCallback.MarkSignalDisconnected(err)
 }
 
 func (c *GrpcClient) notifyConnected() {
